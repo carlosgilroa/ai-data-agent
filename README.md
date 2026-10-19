@@ -93,6 +93,10 @@ ai-data-agent/
 │               ├── health.py       # Lakehouse and vector store health check
 │               ├── catalog.py      # Semantic catalog endpoints
 │               └── agent.py        # Natural language query & direct SQL endpoints
+├── docs/                           # Dedicated architecture & API documentation
+│   ├── README.md                   # Documentation hub & sitemap
+│   └── api/
+│       └── endpoints_reference.md  # Detailed REST endpoints & contracts
 ├── scripts/
 │   ├── run_indexer.py              # CLI indexer test runner
 │   └── run_dev.ps1                 # PowerShell venv setup & uvicorn dev runner
