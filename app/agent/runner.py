@@ -56,7 +56,7 @@ def run_sql_query(sql: str) -> str:
 
 class AgentRunner:
     """Autonomous tool-calling ReAct agent orchestrating LookML catalog RAG,
-    multi-step LLM reasoning, and safe DuckDB analytical execution.
+    multi-step LLM reasoning, conversational session memory, and safe DuckDB analytical execution.
     """
 
     def __init__(self):
@@ -65,6 +65,7 @@ class AgentRunner:
         self.llm = None
         self.llm_with_tools = None
         self.init_error = None
+        self.sessions: Dict[str, List[Any]] = {}
         self._init_llm()
 
     def _init_llm(self):
@@ -122,10 +123,17 @@ class AgentRunner:
         last_sql_executed: Optional[str] = None
         last_sql_data: List[Dict[str, Any]] = []
 
-        messages: List[Any] = [
-            SystemMessage(content=AGENT_SYSTEM_PROMPT),
-            HumanMessage(content=request.query)
-        ]
+        session_id = request.session_id.strip() if (request.session_id and request.session_id.strip()) else None
+
+        # Multi-turn session memory retrieval
+        if session_id and session_id in self.sessions:
+            messages: List[Any] = self.sessions[session_id]
+            messages.append(HumanMessage(content=request.query))
+        else:
+            messages = [
+                SystemMessage(content=AGENT_SYSTEM_PROMPT),
+                HumanMessage(content=request.query)
+            ]
 
         step_counter = 1
         max_iterations = 8
@@ -146,6 +154,13 @@ class AgentRunner:
                     answer = "".join(text_parts).strip()
                 else:
                     answer = str(ai_msg.content).strip()
+
+                # Update session history with sliding window
+                if session_id:
+                    if len(messages) > 15:
+                        messages = [messages[0]] + messages[-14:]
+                    self.sessions[session_id] = messages
+
                 duration_ms = round((time.time() - start_time) * 1000, 2)
                 return QueryResponse(
                     query=request.query,
@@ -227,6 +242,13 @@ class AgentRunner:
         except Exception as e:
             final_answer = f"Agent reached reasoning iteration limit. Last SQL executed: {last_sql_executed}"
 
+        # Update session history with sliding window
+        if session_id:
+            messages.append(AIMessage(content=final_answer))
+            if len(messages) > 15:
+                messages = [messages[0]] + messages[-14:]
+            self.sessions[session_id] = messages
+
         duration_ms = round((time.time() - start_time) * 1000, 2)
         return QueryResponse(
             query=request.query,
@@ -236,6 +258,13 @@ class AgentRunner:
             thought_steps=thought_steps if request.explain else [],
             execution_time_ms=duration_ms
         )
+
+    def clear_session(self, session_id: str) -> bool:
+        """Clear conversation history for a given session ID."""
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+            return True
+        return False
 
 
 agent_runner = AgentRunner()

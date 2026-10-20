@@ -23,6 +23,17 @@ def query_agent(request: QueryRequest) -> QueryResponse:
         raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
 
 
+@router.delete("/session/{session_id}", tags=["AI Data Agent"])
+def reset_session(session_id: str):
+    """Reset the multi-turn conversational memory for a specific session ID."""
+    cleared = agent_runner.clear_session(session_id)
+    return {
+        "session_id": session_id,
+        "cleared": cleared,
+        "message": f"Session '{session_id}' memory cleared successfully." if cleared else f"Session '{session_id}' was not active."
+    }
+
+
 @router.post("/sql", response_model=DirectSQLResponse, tags=["Data Lakehouse"])
 def execute_sql(request: DirectSQLRequest) -> DirectSQLResponse:
     """Directly execute a read-only DuckDB SQL query against the local Parquet lakehouse.

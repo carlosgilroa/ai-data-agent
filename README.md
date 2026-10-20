@@ -51,19 +51,23 @@ flowchart TD
 ## Key Features
 
 1. **Autonomous ReAct Tool-Calling Loop**:
-   - Binds first-class LangChain tools (`search_data_catalog`, `run_sql_query`) directly to **Gemini 1.5 Flash**.
+   - Binds first-class LangChain tools (`search_data_catalog`, `run_sql_query`) directly to **Gemini** (`gemini-3.8-flash`).
    - Dynamically inspects LookML definitions, generates SQL, inspects results, and auto-corrects SQL errors.
+   - Minimalist zero-shot system prompt without hardcoded schemas or tools; uses native API tool-binding schema definitions.
    - Provides explicit error feedback (`400 Bad Request`) when `GEMINI_API_KEY` is missing, eliminating brittle heuristics.
-2. **Resilient Pure-Python DuckDB Lakehouse Execution**:
+2. **Multi-Turn Conversational Session Memory**:
+   - Preserves dialogue history keyed by `session_id` using a 15-message sliding context window.
+   - Session reset endpoint (`DELETE /api/v1/agent/session/{session_id}`) for clearing conversation state.
+3. **Resilient Pure-Python DuckDB Lakehouse Execution**:
    - In-process execution directly against local Parquet files, executing queries in **<10 ms**.
    - Native row serialization without pandas dependency, ensuring maximum speed and zero environment conflicts.
-3. **LookML Semantic Anchoring**:
-   - Parses native LookML `.lkml` files to extract measures, dimensions, and business rules (e.g. `is_transfer = false`, two-tier accounting definitions).
-   - Ingests semantic definitions into ChromaDB, grounding LLM reasoning and eliminating hallucinations.
-4. **Safe AST-Guarded SQL Execution**:
+4. **LookML as Single Source of Truth & AST Indexing**:
+   - Uses native `lkml` parser to extract measures, dimensions, views, explores, and relational joins from `projects/wallet-lookml`.
+   - Ingests semantic definitions into ChromaDB, grounding LLM reasoning and eliminating hallucinations or metric drift.
+5. **Safe AST-Guarded SQL Execution**:
    - Strict read-only enforcement allowing only `SELECT` and `WITH` statements.
    - Regex-based AST safety blocking mutation keywords (`DROP`, `DELETE`, `INSERT`, `ALTER`, `ATTACH`).
-5. **Pydantic v2 Type-Safe Schemas & Interactive Swagger**:
+6. **Pydantic v2 Type-Safe Schemas & Interactive Swagger**:
    - End-to-end data contracts for `QueryRequest`, `QueryResponse`, `AgentThoughtStep`, and `CatalogItem`.
    - Auto-generated interactive API docs accessible out-of-the-box at `/docs`.
 
@@ -84,8 +88,8 @@ ai-data-agent/
 │   │   ├── store.py                # ChromaDB vector store manager & memory fallback
 │   │   └── indexer.py              # LookML & Lakehouse metadata extractor
 │   ├── agent/
-│   │   ├── prompts.py              # System prompt & financial text-to-SQL few-shots
-│   │   ├── runner.py               # Agent orchestrator with tool calling & fallback
+│   │   ├── prompts.py              # Minimalist system prompt (no static schemas)
+│   │   ├── runner.py               # Agent orchestrator with ReAct loop & session memory
 │   │   └── tools/
 │   │       ├── duckdb_tool.py      # Read-only DuckDB SQL engine over Parquets
 │   │       └── rag_tool.py         # Semantic catalog search tool
@@ -95,15 +99,19 @@ ai-data-agent/
 │           └── endpoints/
 │               ├── health.py       # Lakehouse and vector store health check
 │               ├── catalog.py      # Semantic catalog endpoints
-│               └── agent.py        # Natural language query & direct SQL endpoints
+│               └── agent.py        # Natural language query, session reset & direct SQL
 ├── docs/                           # Dedicated architecture & API documentation
 │   ├── README.md                   # Documentation hub & sitemap
-│   └── api/
-│       └── endpoints_reference.md  # Detailed REST endpoints & contracts
+│   ├── api/
+│   │   └── endpoints_reference.md  # Detailed REST endpoints & contracts
+│   └── architecture/
+│       ├── agent_architecture.md   # Autonomous ReAct loop, session memory & SQL safety
+│       └── semantic_rag_indexer.md # LookML AST parser, views/models/joins & ChromaDB RAG
 ├── scripts/
 │   ├── run_indexer.py              # CLI indexer test runner
 │   └── run_dev.ps1                 # PowerShell venv setup & uvicorn dev runner
 ├── tests/
+│   ├── test_agent.py               # Unit tests for ReAct runner, tools & session memory
 │   ├── test_duckdb.py              # Unit tests for DuckDB engine & safety guards
 │   ├── test_schemas.py             # Unit tests for Pydantic data models
 │   └── test_indexer.py             # Unit tests for LookML RAG indexing

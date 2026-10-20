@@ -18,7 +18,8 @@ The **AI-Native Semantic Query Agent & RAG Microservice** exposes a RESTful inte
 | `GET` | [`/api/v1/catalog/search`](#3-search-semantic-catalog) | Semantically search LookML metrics and dimensions using ChromaDB | `Semantic Catalog` |
 | `POST` | [`/api/v1/catalog/index`](#4-trigger-catalog-re-indexing) | Trigger re-parsing of LookML files and Parquet schemas into vector store | `Semantic Catalog` |
 | `POST` | [`/api/v1/agent/query`](#5-natural-language-agent-query) | Primary natural language financial inquiry endpoint with thought traces | `AI Data Agent` |
-| `POST` | [`/api/v1/agent/sql`](#6-direct-read-only-sql-execution) | Execute read-only DuckDB SQL queries with strict AST safety enforcement | `Data Lakehouse` |
+| `DELETE` | [`/api/v1/agent/session/{session_id}`](#6-reset-conversational-session-memory) | Clear multi-turn conversational session memory | `AI Data Agent` |
+| `POST` | [`/api/v1/agent/sql`](#7-direct-read-only-sql-execution) | Execute read-only DuckDB SQL queries with strict AST safety enforcement | `Data Lakehouse` |
 
 ---
 
@@ -203,7 +204,38 @@ If `GEMINI_API_KEY` is empty or unconfigured in `.env`, the endpoint rejects req
 
 ---
 
-## 6. Direct Read-Only SQL Execution
+## 6. Reset Conversational Session Memory
+
+### `DELETE /api/v1/agent/session/{session_id}`
+
+Resets and clears the in-memory conversation history and sliding message window for a specific `session_id`.
+
+#### Path Parameters
+| Parameter | Type | Required | Description |
+|:---|:---|:---|:---|
+| `session_id` | `string` | **Yes** | Unique session identifier previously passed in `QueryRequest` |
+
+#### Response (`200 OK`)
+```json
+{
+  "session_id": "session-financial-review-1",
+  "cleared": true,
+  "message": "Session 'session-financial-review-1' memory cleared successfully."
+}
+```
+
+If the session ID was not active or already expired, `cleared` is `false`:
+```json
+{
+  "session_id": "session-financial-review-1",
+  "cleared": false,
+  "message": "Session 'session-financial-review-1' was not active."
+}
+```
+
+---
+
+## 7. Direct Read-Only SQL Execution
 
 ### `POST /api/v1/agent/sql`
 

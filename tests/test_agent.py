@@ -58,3 +58,31 @@ def test_api_endpoint_returns_400_when_key_missing():
     finally:
         settings.GEMINI_API_KEY = original_key
         agent_runner.api_key = original_key
+
+
+def test_session_clear_endpoint():
+    """Verify DELETE /api/v1/agent/session/{session_id} clears conversational memory."""
+    from langchain_core.messages import HumanMessage, AIMessage
+
+    test_session = "test-session-suite-1"
+    # Seed session
+    agent_runner.sessions[test_session] = [
+        HumanMessage(content="What were my expenses in January 2026?"),
+        AIMessage(content="Your total expenses were $2,500,000 COP.")
+    ]
+    assert test_session in agent_runner.sessions
+
+    # Call delete endpoint
+    response = client.delete(f"/api/v1/agent/session/{test_session}")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["session_id"] == test_session
+    assert data["cleared"] is True
+    assert test_session not in agent_runner.sessions
+
+    # Call delete endpoint again on non-existent session
+    response2 = client.delete(f"/api/v1/agent/session/{test_session}")
+    assert response2.status_code == 200
+    data2 = response2.json()
+    assert data2["cleared"] is False
+

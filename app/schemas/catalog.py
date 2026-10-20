@@ -26,7 +26,7 @@ class MetricDefinition(BaseModel):
 class CatalogItem(BaseModel):
     """Unified document representation for ChromaDB vector indexing."""
     id: str = Field(..., description="Unique document ID (e.g. fct_transactions.net_cashflow_eur)")
-    item_type: Literal["dimension", "metric", "table", "view"] = Field(..., description="Catalog entry type")
+    item_type: Literal["dimension", "metric", "table", "view", "explore", "join"] = Field(..., description="Catalog entry type")
     name: str = Field(..., description="Name of the item")
     view: str = Field(..., description="Parent view or table name")
     description: str = Field(..., description="Detailed semantic description used for embeddings")

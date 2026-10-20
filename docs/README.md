@@ -8,25 +8,27 @@ Welcome to the technical documentation for the **AI-Native Semantic Query Agent 
 
 ```text
 docs/
-├── README.md                      # Documentation overview and sitemap (this file)
-├── api/                           # REST API specifications and contracts
-│   └── endpoints_reference.md     # Complete REST endpoints, schemas, and examples
-├── architecture/                  # System design, RAG pipeline & safety guards (Upcoming)
-│   ├── system_design.md           # [Planned] Orchestration, tool calling & data flow
-│   └── ast_sql_safety.md          # [Planned] Safe read-only DuckDB execution model
-├── evaluation/                    # Golden benchmarks & reconciliation (Upcoming)
-│   ├── golden_suite.md            # [Under Review] Benchmark questions & ground-truth validation
-│   └── metrics_and_drift.md       # [Planned] LookML semantic drift detection
-└── deployment/                    # Local and production deployment guides (Upcoming)
-    ├── local_development.md       # [Planned] Local venv, Windows execution, environment
-    └── docker_compose.md          # [Planned] Containerization & Raspberry Pi integration
+├── README.md                          # Documentation overview and sitemap (this file)
+├── api/                               # REST API specifications and contracts
+│   └── endpoints_reference.md         # Complete REST endpoints, schemas, and examples
+├── architecture/                      # System design, RAG pipeline & safety guards
+│   ├── agent_architecture.md          # Autonomous ReAct loop, session memory & SQL safety
+│   └── semantic_rag_indexer.md        # LookML AST parser, views/models/joins & ChromaDB RAG
+├── evaluation/                        # Golden benchmarks & reconciliation (Upcoming)
+│   ├── golden_suite.md                # [Under Review] Benchmark questions & ground-truth validation
+│   └── metrics_and_drift.md           # [Planned] LookML semantic drift detection
+└── deployment/                        # Local and production deployment guides (Upcoming)
+    ├── local_development.md           # [Planned] Local venv, Windows execution, environment
+    └── docker_compose.md              # [Planned] Containerization & Raspberry Pi integration
 ```
 
 ---
 
 ## Active Documentation
 
-- **[REST API Endpoints Reference](./api/endpoints_reference.md)**: Full specification of all `/api/v1` endpoints (`/health`, `/catalog`, `/agent/query`, `/agent/sql`), request/response contracts, and code samples.
+- **[REST API Endpoints Reference](./api/endpoints_reference.md)**: Full specification of all `/api/v1` endpoints (`/health`, `/catalog`, `/agent/query`, `/agent/session/{session_id}`, `/agent/sql`), request/response contracts, and code samples.
+- **[Agent Architecture & ReAct Orchestration](./architecture/agent_architecture.md)**: Autonomous ReAct loop, minimalist zero-shot prompt design, tool binding, multi-turn sliding window memory, and AST execution guardrails.
+- **[Semantic RAG Indexer Architecture](./architecture/semantic_rag_indexer.md)**: LookML single source of truth, AST extraction of views/models/joins (`lkml`), ChromaDB vector store, and data catalog retrieval.
 
 ---
 

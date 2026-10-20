@@ -11,9 +11,8 @@ logger = logging.getLogger(__name__)
 
 
 class SemanticCatalogIndexer:
-    """Extracts semantic definitions from LookML views and DuckDB Parquet lakehouse,
-
-    indexing them into ChromaDB for agent RAG retrieval.
+    """Extracts semantic definitions from LookML views, explores, joins, and data lake tables,
+    indexing them into ChromaDB as the single analytical source of truth.
     """
 
     def __init__(self):
@@ -21,7 +20,7 @@ class SemanticCatalogIndexer:
         self.data_dir = Path(settings.WALLET_DATA_DIR)
 
     def extract_from_lookml(self) -> List[CatalogItem]:
-        """Parse .lkml files to extract measures, dimensions, and semantic business logic."""
+        """Parse .view.lkml and .model.lkml files to extract measures, dimensions, explores, and joins."""
         items: List[CatalogItem] = []
         try:
             import lkml
@@ -29,64 +28,116 @@ class SemanticCatalogIndexer:
             logger.warning("lkml package not installed. Generating catalog from predefined LookML semantics.")
             return self._get_fallback_lookml_catalog()
 
+        # 1. Parse LookML Views (Measures & Dimensions)
         views_dir = self.lookml_dir / "views"
-        if not views_dir.exists():
-            logger.warning("LookML views dir %s does not exist. Using fallback catalog.", views_dir)
-            return self._get_fallback_lookml_catalog()
+        if views_dir.exists():
+            for lkml_path in views_dir.glob("**/*.view.lkml"):
+                try:
+                    with open(lkml_path, "r", encoding="utf-8") as f:
+                        parsed = lkml.load(f)
 
-        for lkml_path in views_dir.glob("**/*.view.lkml"):
-            try:
-                with open(lkml_path, "r", encoding="utf-8") as f:
-                    parsed = lkml.load(f)
+                    views = parsed.get("views", [])
+                    for view in views:
+                        view_name = view.get("name", lkml_path.stem.replace(".view", ""))
+                        table_name = view.get("sql_table_name", view_name)
 
-                views = parsed.get("views", [])
-                for view in views:
-                    view_name = view.get("name", lkml_path.stem.replace(".view", ""))
-                    
-                    # Dimensions
-                    for dim in view.get("dimensions", []):
+                        # Dimensions
+                        for dim in view.get("dimensions", []):
+                            items.append(
+                                CatalogItem(
+                                    id=f"{view_name}.{dim.get('name')}",
+                                    item_type="dimension",
+                                    name=dim.get("name", ""),
+                                    view=view_name,
+                                    description=dim.get("description", f"Dimension {dim.get('name')} in {view_name}"),
+                                    sql_formula=dim.get("sql"),
+                                    table_name=table_name,
+                                    examples=[
+                                        f"Filter or group by {dim.get('name')}",
+                                        f"Break down metrics by {dim.get('name')}"
+                                    ]
+                                )
+                            )
+
+                        # Measures
+                        for measure in view.get("measures", []):
+                            desc = measure.get("description", f"Measure {measure.get('name')} in {view_name}")
+                            formula = measure.get("sql", f"{measure.get('type')}(*)")
+                            filters = measure.get("filters", [])
+                            if filters:
+                                filter_desc = " [Filters: " + ", ".join([f"{k} = {v}" for f in filters for k, v in f.items()]) + "]"
+                                desc += filter_desc
+
+                            items.append(
+                                CatalogItem(
+                                    id=f"{view_name}.{measure.get('name')}",
+                                    item_type="metric",
+                                    name=measure.get("name", ""),
+                                    view=view_name,
+                                    description=desc,
+                                    sql_formula=formula,
+                                    table_name=table_name,
+                                    examples=[
+                                        f"Calculate {measure.get('name')}",
+                                        f"What is the {measure.get('name')}?"
+                                    ]
+                                )
+                            )
+                except Exception as e:
+                    logger.error("Error parsing LookML view file %s: %s", lkml_path, e)
+
+        # 2. Parse LookML Models (Explores and Join Relationships)
+        models_dir = self.lookml_dir / "models"
+        if models_dir.exists():
+            for model_path in models_dir.glob("**/*.model.lkml"):
+                try:
+                    with open(model_path, "r", encoding="utf-8") as f:
+                        parsed = lkml.load(f)
+
+                    for explore in parsed.get("explores", []):
+                        explore_name = explore.get("name")
+                        explore_label = explore.get("label", explore_name)
+                        explore_desc = explore.get("description", f"Explore {explore_name}")
+
                         items.append(
                             CatalogItem(
-                                id=f"{view_name}.{dim.get('name')}",
-                                item_type="dimension",
-                                name=dim.get("name", ""),
-                                view=view_name,
-                                description=dim.get("description", f"Dimension {dim.get('name')} in {view_name}"),
-                                sql_formula=dim.get("sql"),
-                                table_name=view.get("sql_table_name"),
-                                examples=[
-                                    f"Filter or group by {dim.get('name')}",
-                                    f"Break down metrics by {dim.get('name')}"
-                                ]
+                                id=f"explore.{explore_name}",
+                                item_type="explore",
+                                name=explore_name,
+                                view=explore_name,
+                                description=f"LookML Explore '{explore_label}': {explore_desc}",
+                                sql_formula=None,
+                                table_name=explore_name,
+                                examples=[f"Query {explore_name}", f"Explore financial data in {explore_name}"]
                             )
                         )
 
-                    # Measures
-                    for measure in view.get("measures", []):
-                        desc = measure.get("description", f"Measure {measure.get('name')} in {view_name}")
-                        formula = measure.get("sql", f"{measure.get('type')}(*)")
-                        filters = measure.get("filters", [])
-                        if filters:
-                            filter_desc = " Filters: " + ", ".join([f"{k} = {v}" for f in filters for k, v in f.items()])
-                            desc += filter_desc
-                            
-                        items.append(
-                            CatalogItem(
-                                id=f"{view_name}.{measure.get('name')}",
-                                item_type="metric",
-                                name=measure.get("name", ""),
-                                view=view_name,
-                                description=desc,
-                                sql_formula=formula,
-                                table_name=view.get("sql_table_name"),
-                                examples=[
-                                    f"Calculate {measure.get('name')}",
-                                    f"What is the {measure.get('name')} for this month?"
-                                ]
+                        for join in explore.get("joins", []):
+                            join_name = join.get("name")
+                            rel = join.get("relationship", "many_to_one")
+                            sql_on = join.get("sql_on", "").strip()
+                            join_type = join.get("type", "left_outer")
+
+                            items.append(
+                                CatalogItem(
+                                    id=f"join.{explore_name}.{join_name}",
+                                    item_type="join",
+                                    name=f"{explore_name} -> {join_name}",
+                                    view=explore_name,
+                                    description=(
+                                        f"LookML Join in explore '{explore_name}': {join_type} join to '{join_name}' "
+                                        f"(cardinality: {rel}). Join condition: {sql_on}"
+                                    ),
+                                    sql_formula=sql_on,
+                                    table_name=join_name,
+                                    examples=[
+                                        f"Join {explore_name} with {join_name}",
+                                        f"Connect {explore_name} and {join_name} on {sql_on}"
+                                    ]
+                                )
                             )
-                        )
-            except Exception as e:
-                logger.error("Error parsing LookML file %s: %s", lkml_path, e)
+                except Exception as e:
+                    logger.error("Error parsing LookML model file %s: %s", model_path, e)
 
         if not items:
             return self._get_fallback_lookml_catalog()
@@ -131,7 +182,7 @@ class SemanticCatalogIndexer:
                 item_type="metric",
                 name="tier1_operational_spend_usd",
                 view="fct_transactions",
-                description="Two-Tier Accounting: Essential routine living burn rate (Tier 1 Needs, rent, groceries, utilities).",
+                description="Two-Tier Accounting: Essential routine living burn rate (Tier 1 Needs, rent, groceries, utilities). Filters: is_transfer = false, accounting_tier = 1.",
                 sql_formula="SUM(ABS(amount)) FILTER (WHERE tier_group LIKE '%Tier 1%')",
                 table_name="master_records",
                 examples=["What is my Tier 1 burn rate?", "How much do essential living expenses cost?"]
@@ -151,7 +202,7 @@ class SemanticCatalogIndexer:
                 item_type="metric",
                 name="savings_rate_percentage",
                 view="fct_transactions",
-                description="Percentage of total income retained or allocated to Tier 2 capital funds. savings_rate = net_cashflow / total_income * 100.",
+                description="Percentage of total income retained or allocated to Tier 2 capital funds. savings_rate = net_cashflow / operating_income * 100.",
                 sql_formula="net_cashflow / operating_income * 100",
                 table_name="mart_monthly_pnl",
                 examples=["What is my savings rate?", "Am I meeting my 30% savings rate target?"]
@@ -176,10 +227,40 @@ class SemanticCatalogIndexer:
                 table_name="master_records",
                 examples=["Show balances by account class", "Spending on credit cards"]
             ),
+            CatalogItem(
+                id="explore.fct_transactions",
+                item_type="explore",
+                name="fct_transactions",
+                view="fct_transactions",
+                description="Primary financial transactions ledger explore. Joins dim_accounts, dim_categories, and dim_fx_rates.",
+                sql_formula=None,
+                table_name="master_records",
+                examples=["Personal finance and cash flow ledger explore"]
+            ),
+            CatalogItem(
+                id="join.fct_transactions.dim_categories",
+                item_type="join",
+                name="fct_transactions -> dim_categories",
+                view="fct_transactions",
+                description="Join condition: ${fct_transactions.category_id} = ${dim_categories.category_id} (many_to_one). Connects transactions to Two-Tier accounting tiers.",
+                sql_formula="${fct_transactions.category_id} = ${dim_categories.category_id}",
+                table_name="dim_categories",
+                examples=["Join fct_transactions with dim_categories"]
+            ),
+            CatalogItem(
+                id="join.fct_transactions.dim_accounts",
+                item_type="join",
+                name="fct_transactions -> dim_accounts",
+                view="fct_transactions",
+                description="Join condition: ${fct_transactions.account_id} = ${dim_accounts.account_id} (many_to_one). Connects transactions to account classes.",
+                sql_formula="${fct_transactions.account_id} = ${dim_accounts.account_id}",
+                table_name="dim_accounts",
+                examples=["Join fct_transactions with dim_accounts"]
+            ),
         ]
 
     def extract_from_lakehouse(self) -> List[CatalogItem]:
-        """Inspect DuckDB Parquet schemas to index physical table structures."""
+        """Inspect DuckDB Parquet schemas to index physical table structures without pandas dependency."""
         items: List[CatalogItem] = []
         tables = [
             ("master_records", settings.silver_records_path, "Cleaned transaction ledger with accounts, categories, and amounts"),
@@ -193,8 +274,9 @@ class SemanticCatalogIndexer:
             if not file_path.exists():
                 continue
             try:
-                df = conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{file_path.as_posix()}')").df()
-                cols = [f"{row['column_name']} ({row['column_type']})" for _, row in df.iterrows()]
+                # Use native fetchall() without pandas
+                res = conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{file_path.as_posix()}')").fetchall()
+                cols = [f"{row[0]} ({row[1]})" for row in res]
                 items.append(
                     CatalogItem(
                         id=f"table.{table_name}",
@@ -222,16 +304,20 @@ class SemanticCatalogIndexer:
 
         metrics_count = sum(1 for i in all_items if i.item_type == "metric")
         dimensions_count = sum(1 for i in all_items if i.item_type == "dimension")
+        explores_count = sum(1 for i in all_items if i.item_type == "explore")
+        joins_count = sum(1 for i in all_items if i.item_type == "join")
         tables_count = sum(1 for i in all_items if i.item_type == "table")
 
         logger.info(
-            "Indexing completed: %d total items (%d metrics, %d dimensions, %d tables)",
-            len(all_items), metrics_count, dimensions_count, tables_count
+            "Indexing completed: %d total items (%d metrics, %d dimensions, %d explores, %d joins, %d tables)",
+            len(all_items), metrics_count, dimensions_count, explores_count, joins_count, tables_count
         )
         return {
             "total_indexed": len(all_items),
             "metrics": metrics_count,
             "dimensions": dimensions_count,
+            "explores": explores_count,
+            "joins": joins_count,
             "tables": tables_count,
             "items": all_items
         }
