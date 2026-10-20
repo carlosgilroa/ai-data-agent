@@ -46,7 +46,7 @@ Verifies the operational status of the service, DuckDB in-memory registration of
 }
 ```
 
-*Note: If `gemini_configured` is `false`, the agent operates in intelligent semantic heuristic fallback mode.*
+*Note: A valid `GEMINI_API_KEY` is required to run the autonomous agent. If `gemini_configured` is `false`, requests to `/api/v1/agent/query` will return HTTP 400 Bad Request.*
 
 ---
 

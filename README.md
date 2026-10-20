@@ -147,14 +147,14 @@ Copy `.env.example` to `.env`:
 cp .env.example .env
 ```
 
-Optionally set your Google AI Studio Free Tier key:
+Set your Google AI Studio API key in `.env`:
 ```ini
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-3.8-flash
 WALLET_DATA_DIR=C:/projects/wallet/data
 LOOKML_DIR=C:/projects/wallet-lookml
 ```
-*(Note: If no API key is provided, the service runs in an intelligent semantic heuristic mode, allowing full API testing and verification offline.)*
+*(Note: A valid `GEMINI_API_KEY` is required to run the autonomous agent. If omitted or unconfigured, the endpoint explicitly returns HTTP 400 Bad Request to prevent ungrounded heuristics.)*
 
 ### 3. Run Semantic Indexer
 
@@ -244,22 +244,3 @@ Returns matching LookML metrics, such as `tier1_operational_spend_usd` and assoc
   "execution_time_ms": 6.44
 }
 ```
-
----
-
-## PoC 2 Roadmap & Milestones
-
-- [x] **Milestone 2.1**: Scaffolding, Pydantic v2 Schemas & Safe In-Memory DuckDB Engine
-- [x] **Milestone 2.2**: LookML Semantic RAG Indexer & ChromaDB Vector Store Integration
-- [x] **Milestone 2.3**: Tool-Calling Agent Execution Loop (LangChain / Gemini 1.5 Flash)
-- [x] **Milestone 2.4**: FastAPI Microservice & REST APIs (Swagger, Uvicorn, Health checks)
-- [ ] **Milestone 2.5**: End-to-End Evaluation, Golden P&L Reconciliation & Dockerization
-
----
-
-## Author
-**Carlos Gil Roa**  
-*Senior Data & AI Analytics Engineer*  
-- Portfolio: [carlosgilroa.github.io](https://carlosgilroa.github.io)
-- GitHub: [@carlosgilroa](https://github.com/carlosgilroa)
-- LinkedIn: [carlos-gil-roa](https://linkedin.com/in/carlos-gil-roa)
