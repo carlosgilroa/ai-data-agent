@@ -50,18 +50,21 @@ flowchart TD
 
 ## Key Features
 
-1. **Zero-Cost High-Performance Architecture**:
-   - Leverages **Gemini 1.5 Flash Free Tier** (15 RPM, 1,500 requests/day, native function calling) with $0 API overhead.
-   - Employs **DuckDB** in-process vector execution directly against local Parquet files, executing queries in **<10 ms**.
-2. **LookML Semantic Anchoring**:
+1. **Autonomous ReAct Tool-Calling Loop**:
+   - Binds first-class LangChain tools (`search_data_catalog`, `run_sql_query`) directly to **Gemini 1.5 Flash**.
+   - Dynamically inspects LookML definitions, generates SQL, inspects results, and auto-corrects SQL errors.
+   - Provides explicit error feedback (`400 Bad Request`) when `GEMINI_API_KEY` is missing, eliminating brittle heuristics.
+2. **Resilient Pure-Python DuckDB Lakehouse Execution**:
+   - In-process execution directly against local Parquet files, executing queries in **<10 ms**.
+   - Native row serialization without pandas dependency, ensuring maximum speed and zero environment conflicts.
+3. **LookML Semantic Anchoring**:
    - Parses native LookML `.lkml` files to extract measures, dimensions, and business rules (e.g. `is_transfer = false`, two-tier accounting definitions).
    - Ingests semantic definitions into ChromaDB, grounding LLM reasoning and eliminating hallucinations.
-3. **Safe AST-Guarded SQL Execution**:
+4. **Safe AST-Guarded SQL Execution**:
    - Strict read-only enforcement allowing only `SELECT` and `WITH` statements.
    - Regex-based AST safety blocking mutation keywords (`DROP`, `DELETE`, `INSERT`, `ALTER`, `ATTACH`).
-4. **Pydantic v2 Type-Safe Schemas**:
+5. **Pydantic v2 Type-Safe Schemas & Interactive Swagger**:
    - End-to-end data contracts for `QueryRequest`, `QueryResponse`, `AgentThoughtStep`, and `CatalogItem`.
-5. **Interactive Swagger & OpenAPI Documentation**:
    - Auto-generated interactive API docs accessible out-of-the-box at `/docs`.
 
 ---
@@ -139,7 +142,7 @@ cp .env.example .env
 Optionally set your Google AI Studio Free Tier key:
 ```ini
 GEMINI_API_KEY=your_gemini_api_key_here
-GEMINI_MODEL=gemini-1.5-flash
+GEMINI_MODEL=gemini-3.8-flash
 WALLET_DATA_DIR=C:/projects/wallet/data
 LOOKML_DIR=C:/projects/wallet-lookml
 ```

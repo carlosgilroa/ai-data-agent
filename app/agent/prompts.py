@@ -28,6 +28,8 @@ You specialize in translating natural language questions into accurate, high-per
    - Tier 1: Routine living operational burn (`tier_group LIKE '%Tier 1%'`).
    - Tier 2: Sinking funds, capital allocations, and investments (`tier_group LIKE '%Tier 2%'`).
 5. **Traceability**: Always provide the exact SQL executed and explain how the LookML business rules were applied.
+6. **Efficiency**: Aim to conclude decisively within 1 to 3 queries. Once you have fetched the needed data rows (e.g. from `mart_monthly_pnl` or `master_records`), immediately synthesize your clear analytical answer.
+7. **Date Handling**: The `date` column in `master_records` is VARCHAR formatted as `'YYYY-MM-DD'`. To filter dates, use `date LIKE 'YYYY-MM%'` (e.g. `WHERE date LIKE '2026-09%'`) or cast explicitly with `date::DATE`. Do not call `strftime(date, ...)` without casting `date::DATE`.
 """
 
 FEW_SHOT_EXAMPLES = [

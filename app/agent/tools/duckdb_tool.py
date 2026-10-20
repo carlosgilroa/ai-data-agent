@@ -1,5 +1,7 @@
 import time
 import logging
+import math
+from decimal import Decimal
 from typing import Dict, Any, List, Optional
 import duckdb
 from app.core.config import settings
@@ -69,13 +71,30 @@ class DuckDBTool:
                     "execution_time_ms": (time.time() - start_time) * 1000
                 }
 
-            # Limit result size for agent safety
-            df = rel.limit(max_rows).df()
+            # Limit result size for agent safety and fetch rows natively without pandas
+            rel_limited = rel.limit(max_rows)
+            columns = list(rel_limited.columns)
+            rows = rel_limited.fetchall()
             duration_ms = (time.time() - start_time) * 1000
 
-            # Convert numpy/pandas types to standard python types for JSON serialization
-            records = df.to_dict(orient="records")
-            columns = list(df.columns)
+            # Pure Python JSON-safe record conversion
+            records = []
+            for row in rows:
+                record = {}
+                for col_name, val in zip(columns, row):
+                    if val is None:
+                        record[col_name] = None
+                    elif isinstance(val, (bool, str, int)):
+                        record[col_name] = val
+                    elif isinstance(val, float):
+                        record[col_name] = None if (math.isnan(val) or math.isinf(val)) else val
+                    elif isinstance(val, Decimal):
+                        record[col_name] = float(val) if val.is_finite() else None
+                    elif hasattr(val, "isoformat"):  # date, datetime, time
+                        record[col_name] = val.isoformat()
+                    else:
+                        record[col_name] = str(val)
+                records.append(record)
 
             return {
                 "columns": columns,

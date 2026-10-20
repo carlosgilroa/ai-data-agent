@@ -17,6 +17,8 @@ def query_agent(request: QueryRequest) -> QueryResponse:
     try:
         response = agent_runner.run_query(request)
         return response
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
 

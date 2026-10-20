@@ -2,27 +2,78 @@ import time
 import logging
 import json
 from typing import Dict, Any, List, Optional
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
+from langchain_core.tools import tool
 from app.core.config import settings
 from app.schemas.query import QueryRequest, QueryResponse, AgentThoughtStep
 from app.agent.tools.duckdb_tool import duckdb_tool
-from app.agent.tools.rag_tool import search_data_catalog
+from app.agent.tools.rag_tool import search_data_catalog as raw_search_catalog
 from app.agent.prompts import AGENT_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
 
+# -------------------------------------------------------------------------
+# First-Class LangChain Tools for Autonomous Agent
+# -------------------------------------------------------------------------
+
+@tool
+def search_data_catalog(query: str) -> str:
+    """Search the LookML semantic catalog and lakehouse schema for business metric definitions,
+    calculation formulas, dimension names, and table structures. Call this whenever you need to find
+    how financial metrics (like total spend, net cashflow, savings rate, burn rate) are defined or what
+    tables and columns exist.
+    """
+    return raw_search_catalog(query, top_k=5)
+
+
+@tool
+def run_sql_query(sql: str) -> str:
+    """Execute a safe read-only SQL query against local DuckDB lakehouse tables
+    (master_records, fx_rates, mart_monthly_pnl, mart_expense_summary).
+    Returns columns, row count, and sample data rows.
+    """
+    try:
+        res = duckdb_tool.run_query(sql)
+        row_count = res.get("row_count", 0)
+        columns = res.get("columns", [])
+        data = res.get("data", [])
+        if row_count == 0:
+            return f"Query executed successfully ({res.get('execution_time_ms', 0)}ms) but returned 0 rows. Columns: {columns}."
+        return json.dumps({
+            "columns": columns,
+            "row_count": row_count,
+            "execution_time_ms": res.get("execution_time_ms", 0),
+            "rows": data[:15]
+        }, default=str)
+    except Exception as e:
+        return f"DuckDB Execution Error: {str(e)}"
+
+
+# -------------------------------------------------------------------------
+# Autonomous ReAct Agent Runner
+# -------------------------------------------------------------------------
+
 class AgentRunner:
-    """Orchestrates RAG context retrieval, LLM reasoning, and safe DuckDB query execution."""
+    """Autonomous tool-calling ReAct agent orchestrating LookML catalog RAG,
+    multi-step LLM reasoning, and safe DuckDB analytical execution.
+    """
 
     def __init__(self):
         self.api_key = settings.GEMINI_API_KEY
         self.model_name = settings.GEMINI_MODEL
+        self.llm = None
+        self.llm_with_tools = None
+        self.init_error = None
         self._init_llm()
 
     def _init_llm(self):
-        """Initialize LangChain ChatGoogleGenerativeAI if API key is provided."""
-        self.llm = None
-        if self.api_key and self.api_key != "your_gemini_api_key_here":
+        """Initialize LangChain ChatGoogleGenerativeAI and bind tools if API key is provided."""
+        self.api_key = settings.GEMINI_API_KEY
+        self.model_name = settings.GEMINI_MODEL
+        self.init_error = None
+
+        if self.api_key and self.api_key.strip() not in ("", "your_gemini_api_key_here"):
             try:
                 from langchain_google_genai import ChatGoogleGenerativeAI
                 self.llm = ChatGoogleGenerativeAI(
@@ -30,156 +81,160 @@ class AgentRunner:
                     google_api_key=self.api_key,
                     temperature=0.1
                 )
-                logger.info("Initialized Gemini LLM agent with model %s", self.model_name)
+                self.llm_with_tools = self.llm.bind_tools([search_data_catalog, run_sql_query])
+                logger.info("Initialized Gemini autonomous ReAct agent with model %s and bound tools", self.model_name)
             except Exception as e:
-                logger.warning("Failed to initialize LangChain Gemini client: %s. Using heuristic fallback.", e)
+                self.init_error = str(e)
+                self.llm = None
+                self.llm_with_tools = None
+                logger.warning("Failed to initialize LangChain Gemini client: %s", e)
         else:
-            logger.info("No GEMINI_API_KEY configured. Running agent in semantic heuristic mode.")
+            self.llm = None
+            self.llm_with_tools = None
+            logger.info("No GEMINI_API_KEY configured. Autonomous tool-calling agent requires a valid key.")
 
     def run_query(self, request: QueryRequest) -> QueryResponse:
-        """Process user query through semantic catalog RAG and DuckDB execution."""
+        """Execute autonomous ReAct loop:
+        1. Check API key presence.
+        2. LLM autonomously invokes search_data_catalog and/or run_sql_query.
+        3. If DuckDB returns SQL error, LLM self-corrects.
+        4. LLM synthesizes grounded final financial answer.
+        """
         start_time = time.time()
-        thought_steps: List[AgentThoughtStep] = []
 
-        # Step 1: Query semantic catalog for relevant LookML measures and schema
-        step1_thought = f"Searching semantic catalog for metrics and dimensions related to: '{request.query}'"
-        rag_context = search_data_catalog(request.query, top_k=4)
-        thought_steps.append(
-            AgentThoughtStep(
-                step_number=1,
-                tool="search_data_catalog",
-                tool_input={"query": request.query},
-                tool_output=rag_context,
-                thought=step1_thought
+        # Re-check API key in case settings were updated dynamically
+        if self.llm_with_tools is None:
+            self._init_llm()
+
+        if not self.api_key or self.api_key.strip() in ("", "your_gemini_api_key_here"):
+            raise RuntimeError(
+                "GEMINI_API_KEY is not configured. An active Google Gemini API key is required "
+                "to execute the autonomous tool-calling agent loop. Please configure GEMINI_API_KEY in your .env file."
             )
-        )
 
-        # Step 2: Formulate and execute SQL query
-        sql_to_execute = None
-        sql_result: Dict[str, Any] = {"columns": [], "data": [], "row_count": 0}
+        if self.llm_with_tools is None:
+            raise RuntimeError(
+                f"Gemini autonomous agent failed to initialize: {self.init_error or 'LLM client is not ready'}. "
+                "Please verify your GEMINI_API_KEY and network connectivity."
+            )
 
-        # If LLM is available, use tool calling
-        if self.llm is not None:
-            try:
-                sql_to_execute = self._generate_sql_with_llm(request.query, rag_context)
-            except Exception as e:
-                logger.error("LLM SQL generation failed: %s. Falling back to heuristic generator.", e)
-                sql_to_execute = self._generate_heuristic_sql(request.query)
-        else:
-            sql_to_execute = self._generate_heuristic_sql(request.query)
+        thought_steps: List[AgentThoughtStep] = []
+        last_sql_executed: Optional[str] = None
+        last_sql_data: List[Dict[str, Any]] = []
 
-        # Step 3: Run SQL in DuckDB
-        if sql_to_execute:
-            step2_thought = f"Executing LookML-aligned SQL against local DuckDB Lakehouse: {sql_to_execute}"
-            try:
-                sql_result = duckdb_tool.run_query(sql_to_execute)
-                thought_steps.append(
-                    AgentThoughtStep(
-                        step_number=2,
-                        tool="run_sql_query",
-                        tool_input={"sql": sql_to_execute},
-                        tool_output=f"Returned {sql_result.get('row_count', 0)} rows. Columns: {sql_result.get('columns', [])}",
-                        thought=step2_thought
-                    )
+        messages: List[Any] = [
+            SystemMessage(content=AGENT_SYSTEM_PROMPT),
+            HumanMessage(content=request.query)
+        ]
+
+        step_counter = 1
+        max_iterations = 8
+
+        for _ in range(max_iterations):
+            ai_msg = self.llm_with_tools.invoke(messages)
+            messages.append(ai_msg)
+
+            # If no tool calls were requested, the model has completed its final answer
+            if not ai_msg.tool_calls:
+                if isinstance(ai_msg.content, str):
+                    answer = ai_msg.content
+                elif isinstance(ai_msg.content, list):
+                    text_parts = [
+                        item.get("text", "") if isinstance(item, dict) else str(item)
+                        for item in ai_msg.content
+                    ]
+                    answer = "".join(text_parts).strip()
+                else:
+                    answer = str(ai_msg.content).strip()
+                duration_ms = round((time.time() - start_time) * 1000, 2)
+                return QueryResponse(
+                    query=request.query,
+                    answer=answer,
+                    sql=last_sql_executed,
+                    data=last_sql_data if request.explain else [],
+                    thought_steps=thought_steps if request.explain else [],
+                    execution_time_ms=duration_ms
                 )
-            except Exception as e:
-                thought_steps.append(
-                    AgentThoughtStep(
-                        step_number=2,
-                        tool="run_sql_query",
-                        tool_input={"sql": sql_to_execute},
-                        tool_output=f"Execution error: {str(e)}",
-                        thought=f"Attempted execution but failed with: {str(e)}"
-                    )
-                )
 
-        # Step 4: Synthesize response
-        answer = self._synthesize_answer(request.query, sql_to_execute, sql_result)
+            # Process each autonomous tool invocation
+            for tc in ai_msg.tool_calls:
+                tool_name = tc.get("name")
+                tool_args = tc.get("args") or {}
+                tool_id = tc.get("id")
+
+                thought_text = f"Agent decided to invoke tool '{tool_name}' with parameters: {tool_args}"
+
+                if tool_name == "search_data_catalog":
+                    tool_output = search_data_catalog.invoke(tool_args)
+                    thought_steps.append(
+                        AgentThoughtStep(
+                            step_number=step_counter,
+                            tool="search_data_catalog",
+                            tool_input=tool_args,
+                            tool_output=tool_output,
+                            thought=thought_text
+                        )
+                    )
+                elif tool_name == "run_sql_query":
+                    sql_arg = tool_args.get("sql", "")
+                    last_sql_executed = sql_arg
+                    try:
+                        sql_res = duckdb_tool.run_query(sql_arg)
+                        last_sql_data = sql_res.get("data", [])
+                        tool_output = json.dumps({
+                            "columns": sql_res.get("columns", []),
+                            "row_count": sql_res.get("row_count", 0),
+                            "execution_time_ms": sql_res.get("execution_time_ms", 0),
+                            "rows": last_sql_data[:15]
+                        }, default=str)
+                    except Exception as e:
+                        tool_output = f"DuckDB Execution Error: {str(e)}"
+
+                    thought_steps.append(
+                        AgentThoughtStep(
+                            step_number=step_counter,
+                            tool="run_sql_query",
+                            tool_input=tool_args,
+                            tool_output=tool_output,
+                            thought=thought_text
+                        )
+                    )
+                else:
+                    tool_output = f"Error: Unknown tool '{tool_name}'."
+                    thought_steps.append(
+                        AgentThoughtStep(
+                            step_number=step_counter,
+                            tool=tool_name or "unknown",
+                            tool_input=tool_args,
+                            tool_output=tool_output,
+                            thought=f"Attempted unknown tool '{tool_name}'"
+                        )
+                    )
+
+                step_counter += 1
+                messages.append(ToolMessage(content=str(tool_output), tool_call_id=tool_id))
+
+        # If max iterations reached, invoke LLM once more to force synthesis from gathered context
+        try:
+            messages.append(HumanMessage(content="Please synthesize your final analytical answer now based on the query results retrieved above. Do not call any more tools."))
+            final_msg = self.llm.invoke(messages)
+            if isinstance(final_msg.content, str):
+                final_answer = final_msg.content.strip()
+            elif isinstance(final_msg.content, list):
+                final_answer = "".join([part.get("text", "") if isinstance(part, dict) else str(part) for part in final_msg.content]).strip()
+            else:
+                final_answer = str(final_msg.content).strip()
+        except Exception as e:
+            final_answer = f"Agent reached reasoning iteration limit. Last SQL executed: {last_sql_executed}"
+
         duration_ms = round((time.time() - start_time) * 1000, 2)
-
         return QueryResponse(
             query=request.query,
-            answer=answer,
-            sql=sql_to_execute,
-            data=sql_result.get("data", []) if request.explain else [],
+            answer=final_answer,
+            sql=last_sql_executed,
+            data=last_sql_data if request.explain else [],
             thought_steps=thought_steps if request.explain else [],
             execution_time_ms=duration_ms
-        )
-
-    def _generate_sql_with_llm(self, query: str, context: str) -> str:
-        """Call Gemini to generate safe DuckDB SQL using retrieved context."""
-        prompt = f"""{AGENT_SYSTEM_PROMPT}
-
-### SEMANTIC CONTEXT FROM LOOKML CATALOG:
-{context}
-
-### USER QUESTION:
-{query}
-
-Generate ONLY a single valid DuckDB SQL query to answer this question. Do not include markdown code block syntax or explanations, just the raw SQL statement.
-"""
-        response = self.llm.invoke(prompt)
-        raw_text = response.content.strip()
-        # Clean markdown code blocks if returned
-        if raw_text.startswith("```"):
-            raw_text = raw_text.split("\n", 1)[1]
-        if raw_text.endswith("```"):
-            raw_text = raw_text.rsplit("\n", 1)[0]
-        return raw_text.replace("```sql", "").replace("```", "").strip()
-
-    def _generate_heuristic_sql(self, query: str) -> str:
-        """Rule-based text-to-SQL fallback matching standard financial analytical questions."""
-        q = query.lower()
-
-        if "pnl" in q or "profit and loss" in q or "monthly cashflow" in q or "savings rate" in q:
-            return "SELECT year_month, operating_income, operational_expenses, net_cashflow, savings_rate_pct FROM mart_monthly_pnl ORDER BY year_month ASC LIMIT 12;"
-        
-        elif "tier 1" in q or "burn rate" in q or "living" in q or "tier1" in q:
-            return "SELECT tier_group, currency, SUM(ABS(amount)) as total_spent, COUNT(*) as tx_count FROM master_records WHERE is_transfer = false AND type = 'expense' AND tier_group LIKE '%Tier 1%' GROUP BY 1, 2 ORDER BY 3 DESC;"
-
-        elif "category" in q or "categories" in q or "spend" in q or "expense" in q:
-            return "SELECT category_group, category_name, currency, SUM(ABS(amount)) as total_spent, COUNT(*) as tx_count FROM master_records WHERE is_transfer = false AND type = 'expense' GROUP BY 1, 2, 3 ORDER BY 4 DESC LIMIT 10;"
-
-        elif "income" in q or "earned" in q or "salary" in q:
-            return "SELECT category_group, currency, SUM(amount) as total_income, COUNT(*) as tx_count FROM master_records WHERE is_transfer = false AND type = 'income' GROUP BY 1, 2 ORDER BY 3 DESC;"
-
-        elif "account" in q or "balance" in q:
-            return "SELECT account_class, account_name, currency, COUNT(*) as total_records, SUM(amount) as net_activity FROM master_records GROUP BY 1, 2, 3 ORDER BY 1, 2;"
-
-        else:
-            return "SELECT date, account_name, category_name, amount, currency, tier_group FROM master_records WHERE is_transfer = false ORDER BY date DESC LIMIT 10;"
-
-    def _synthesize_answer(self, query: str, sql: Optional[str], result: Dict[str, Any]) -> str:
-        """Produce natural language financial summary from SQL output."""
-        data = result.get("data", [])
-        if not data:
-            return f"No financial records found matching your query: '{query}'. Please verify your date range or filters."
-
-        row_count = len(data)
-        first_row = data[0]
-
-        if "net_cashflow" in first_row:
-            latest = data[-1]
-            return (
-                f"Based on reconciled monthly P&L records (via LookML mart_monthly_pnl):\n"
-                f"- Latest Month ({latest.get('year_month')}): Net Cash Flow was {latest.get('net_cashflow'):,.2f} "
-                f"with a savings rate of {latest.get('savings_rate_pct'):.1f}%.\n"
-                f"- Total operating income was {latest.get('operating_income'):,.2f} against operational expenses of {latest.get('operational_expenses'):,.2f}."
-            )
-
-        if "total_spent" in first_row:
-            top_category = first_row.get("category_name") or first_row.get("category_group") or "Top Category"
-            amount = first_row.get("total_spent", 0)
-            currency = first_row.get("currency", "")
-            return (
-                f"Analysis of {row_count} spending categories (excluding internal transfers per LookML metric definition):\n"
-                f"- Top Category: **{top_category}** with total expenses of **{amount:,.2f} {currency}**.\n"
-                f"- Query executed safely against silver master_records with DuckDB."
-            )
-
-        return (
-            f"Successfully executed query against the local Parquet data lakehouse, returning {row_count} records.\n"
-            f"Key metrics and dimensions were verified against the LookML semantic layer."
         )
 
 

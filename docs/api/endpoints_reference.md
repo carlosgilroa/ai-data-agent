@@ -136,7 +136,12 @@ Forces a live re-parse of LookML views in [`wallet-lookml`](file:///c:/projects/
 
 ### `POST /api/v1/agent/query`
 
-The primary interface for natural language analytics. The orchestrator retrieves relevant LookML context, formulates SQL, executes it against DuckDB in < 10 ms, and synthesizes an answer.
+The primary interface for natural language analytics. Executes an autonomous **ReAct tool-calling loop** with Google Gemini 1.5 Flash and LangChain tools:
+1. Dynamically invokes `search_data_catalog` to discover LookML measures, business rules, and table schemas.
+2. Formulates LookML-aligned SQL and invokes `run_sql_query` against the local DuckDB lakehouse.
+3. Automatically self-corrects SQL if a syntax error or missing column is reported by DuckDB.
+4. Serializes DuckDB result rows using pure-Python primitive type conversion without pandas dependencies.
+5. Synthesizes an accurate, grounded financial answer with full thought-step traceability.
 
 #### Request Body
 ```json
@@ -149,9 +154,9 @@ The primary interface for natural language analytics. The orchestrator retrieves
 | Field | Type | Required | Default | Description |
 |:---|:---|:---|:---|:---|
 | `query` | `string` | **Yes** | — | Natural language inquiry about household finances or expenses |
-| `explain` | `boolean` | No | `false` | If `true`, returns raw table rows (`data`) and intermediate agent reasoning (`thought_steps`) |
+| `explain` | `boolean` | No | `true` | If `true`, returns raw table rows (`data`) and intermediate agent reasoning (`thought_steps`) |
 
-#### Response (`200 OK`)
+#### Successful Response (`200 OK`)
 ```json
 {
   "query": "What is my net cashflow and savings rate by month?",
@@ -171,18 +176,28 @@ The primary interface for natural language analytics. The orchestrator retrieves
       "step_number": 1,
       "tool": "search_data_catalog",
       "tool_input": { "query": "What is my net cashflow and savings rate by month?" },
-      "tool_output": "Matched mart_monthly_pnl and savings_rate_percentage",
-      "thought": "Searching semantic catalog for metrics and dimensions..."
+      "tool_output": "[1] net_cash_flow_usd (metric in fct_transactions | Table: mart_monthly_pnl | SQL: total_income_usd - total_spend_usd)...",
+      "thought": "Agent decided to invoke tool 'search_data_catalog' with parameters: {'query': 'What is my net cashflow and savings rate by month?'}"
     },
     {
       "step_number": 2,
       "tool": "run_sql_query",
       "tool_input": { "sql": "SELECT year_month, operating_income, operational_expenses, net_cashflow, savings_rate_pct FROM mart_monthly_pnl ORDER BY year_month ASC LIMIT 12;" },
-      "tool_output": "Returned 1 rows. Columns: ['year_month', 'operating_income', 'operational_expenses', 'net_cashflow', 'savings_rate_pct']",
-      "thought": "Executing LookML-aligned SQL against local DuckDB Lakehouse..."
+      "tool_output": "{\"columns\": [\"year_month\", \"operating_income\", \"operational_expenses\", \"net_cashflow\", \"savings_rate_pct\"], \"row_count\": 1, \"rows\": [...]}",
+      "thought": "Agent decided to invoke tool 'run_sql_query' with parameters: {'sql': 'SELECT year_month, operating_income, operational_expenses, net_cashflow, savings_rate_pct FROM mart_monthly_pnl ORDER BY year_month ASC LIMIT 12;'}"
     }
   ],
   "execution_time_ms": 6.44
+}
+```
+
+#### Error Response: Missing LLM Configuration (`400 Bad Request`)
+
+If `GEMINI_API_KEY` is empty or unconfigured in `.env`, the endpoint rejects requests with an explicit error rather than executing brittle heuristics:
+
+```json
+{
+  "detail": "GEMINI_API_KEY is not configured. An active Google Gemini API key is required to execute the autonomous tool-calling agent loop. Please configure GEMINI_API_KEY in your .env file."
 }
 ```
 
