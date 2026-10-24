@@ -93,3 +93,6 @@ To prevent low-relevance items from polluting the LLM context while ensuring sin
     $$\text{cutoff} = \max(\text{noise\_floor}, \text{round}(\text{top\_score} \times 0.80, 4))$$
   - All candidate items with $\text{similarity\_score} \ge \text{cutoff}$ are retained up to `top_k`.
   - This allows domain entity queries scoring `0.22`–`0.27` to succeed on the first catalog search without hardcoding entity lists.
+
+7. **Table Metadata Awareness Directives**:
+   - The agent system prompt includes a dedicated `Table Metadata Awareness` section explaining how to interpret `Date Coverage: <min> to <max>` as authoritative temporal bounds and `Stats` as table size/grain, eliminating redundant exploratory calendar queries (`SELECT DISTINCT year_month`).
