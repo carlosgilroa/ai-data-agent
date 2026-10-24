@@ -22,9 +22,14 @@ class DuckDBTool:
         self._register_views()
 
     def _register_views(self):
-        """Register friendly table names pointing directly to parquet data files."""
+        """Register friendly table names pointing directly to parquet data files and LookML derived tables."""
+        import re
+
         tables = [
             ("master_records", settings.silver_records_path),
+            ("dim_accounts", settings.silver_accounts_path),
+            ("dim_categories", settings.silver_categories_path),
+            ("dim_labels", settings.silver_labels_path),
             ("fx_rates", settings.silver_fx_path),
             ("mart_monthly_pnl", settings.gold_pnl_path),
             ("mart_expense_summary", settings.gold_expense_summary_path),
@@ -41,6 +46,27 @@ class DuckDBTool:
                     logger.error("Failed to register view %s for %s: %s", name, path, e)
             else:
                 logger.warning("Parquet path %s does not exist; view %s skipped.", path, name)
+
+        # Dynamically register any LookML derived_table SQL views so PDTs are queryable in DuckDB
+        try:
+            import lkml
+
+            views_dir = settings.LOOKML_DIR / "views"
+            if views_dir.exists():
+                for lkml_path in views_dir.glob("**/*.view.lkml"):
+                    with open(lkml_path, "r", encoding="utf-8") as f:
+                        parsed = lkml.load(f)
+                    for view in parsed.get("views", []):
+                        v_name = view.get("name")
+                        raw_dt_sql = (view.get("derived_table") or {}).get("sql")
+                        if v_name and raw_dt_sql:
+                            compiled_sql = re.sub(
+                                r"`?@\{schema_name\}\.([a-zA-Z0-9_]+)`?", r"\1", raw_dt_sql
+                            ).strip().rstrip(";")
+                            self.conn.execute(f"CREATE OR REPLACE VIEW {v_name} AS {compiled_sql}")
+                            registered.append(v_name)
+        except Exception as e:
+            logger.warning("Could not register LookML derived table views in DuckDB: %s", e)
 
         logger.info("DuckDB initialized with views: %s", registered)
 

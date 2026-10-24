@@ -37,9 +37,13 @@ Verifies the operational status of the service, DuckDB in-memory registration of
   "duckdb_connected": true,
   "tables_available": [
     "master_records",
+    "dim_accounts",
+    "dim_categories",
+    "dim_labels",
     "fx_rates",
     "mart_monthly_pnl",
-    "mart_expense_summary"
+    "mart_expense_summary",
+    "pdt_category_mom_velocity"
   ],
   "vector_store_ready": true,
   "gemini_configured": false
@@ -127,12 +131,12 @@ Wipes the ChromaDB collection clean (`vector_store.clear()`) and forces a live r
 ```json
 {
   "status": "success",
-  "total_indexed": 56,
-  "metrics_count": 14,
-  "dimensions_count": 33,
-  "explores_count": 2,
-  "joins_count": 3,
-  "tables_count": 4
+  "total_indexed": 147,
+  "metrics_count": 32,
+  "dimensions_count": 99,
+  "explores_count": 3,
+  "joins_count": 5,
+  "tables_count": 7
 }
 ```
 

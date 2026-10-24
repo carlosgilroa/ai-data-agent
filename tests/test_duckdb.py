@@ -3,9 +3,34 @@ from app.agent.tools.duckdb_tool import duckdb_tool
 
 
 def test_duckdb_views_registered():
-    """Verify DuckDB registers available Parquet views."""
+    """Verify DuckDB registers all 7 physical Parquet views and derived LookML PDT views."""
     tables = duckdb_tool.get_available_tables()
-    assert "master_records" in tables or len(tables) > 0
+    expected = {
+        "master_records",
+        "dim_accounts",
+        "dim_categories",
+        "dim_labels",
+        "fx_rates",
+        "mart_monthly_pnl",
+        "mart_expense_summary",
+        "pdt_category_mom_velocity",
+    }
+    assert expected.issubset(set(tables))
+
+
+def test_duckdb_dimensional_and_pdt_queries():
+    """Verify DuckDB can query dim_accounts, dim_categories, dim_labels, and pdt_category_mom_velocity."""
+    acc_res = duckdb_tool.run_query("SELECT COUNT(*) AS cnt FROM dim_accounts")
+    assert acc_res["data"][0]["cnt"] > 0
+
+    cat_res = duckdb_tool.run_query("SELECT COUNT(*) AS cnt FROM dim_categories")
+    assert cat_res["data"][0]["cnt"] > 0
+
+    lbl_res = duckdb_tool.run_query("SELECT COUNT(*) AS cnt FROM dim_labels")
+    assert lbl_res["data"][0]["cnt"] > 0
+
+    pdt_res = duckdb_tool.run_query("SELECT COUNT(*) AS cnt FROM pdt_category_mom_velocity")
+    assert pdt_res["data"][0]["cnt"] > 0
 
 
 def test_duckdb_query_execution():

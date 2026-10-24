@@ -190,6 +190,30 @@ class VectorStoreManager:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [item for _, item in scored[:effective_top_k]]
 
+    def get_by_id(self, doc_id: str) -> Optional[CatalogItem]:
+        """Retrieve a specific catalog item by its ID (e.g. 'table.dim_accounts')."""
+        if doc_id in _MEMORY_STORE:
+            return _MEMORY_STORE[doc_id]
+        if self.chroma_available and self.collection is not None:
+            try:
+                res = self.collection.get(ids=[doc_id], include=["metadatas"])
+                metas = res.get("metadatas") or []
+                if metas:
+                    meta = metas[0]
+                    return CatalogItem(
+                        id=doc_id,
+                        item_type=meta.get("item_type", "table"),
+                        name=meta.get("name", ""),
+                        view=meta.get("view", ""),
+                        description=meta.get("description", ""),
+                        sql_formula=meta.get("sql_formula") or None,
+                        table_name=meta.get("table_name") or None,
+                        examples=[],
+                    )
+            except Exception:
+                pass
+        return None
+
     def list_all(self) -> List[CatalogItem]:
         """Return all catalog items."""
         if _MEMORY_STORE:

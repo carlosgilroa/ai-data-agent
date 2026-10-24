@@ -98,18 +98,14 @@ class SemanticCatalogIndexer:
         return f"${{TABLE}}.{dim.get('name', '')}"
 
     @staticmethod
-    def _resolve_physical_table(view_name: str, raw_sql_table: str) -> str:
-        """Map LookML logical view / BigQuery table reference to physical DuckDB lakehouse table(s)."""
-        v_lower = (view_name or "").lower()
-        if "fx_rate" in v_lower:
-            return "fx_rates"
-        if "monthly_cashflow" in v_lower or "pnl" in v_lower:
-            return "mart_monthly_pnl"
-        if "categor" in v_lower:
-            return "master_records, mart_expense_summary"
-        if "transaction" in v_lower or "account" in v_lower:
-            return "master_records"
-        return raw_sql_table or view_name
+    def _strip_lookml_table_macro(raw_sql_table: str, view_name: str) -> str:
+        """Strip LookML `@{schema_name}.` macro prefix and backticks from sql_table_name."""
+        if not raw_sql_table:
+            return view_name
+        cleaned = raw_sql_table.strip().strip("`").strip()
+        if cleaned.startswith("@{schema_name}."):
+            cleaned = cleaned.removeprefix("@{schema_name}.")
+        return cleaned.strip("`").strip() or view_name
 
     def extract_from_lookml(self) -> List[CatalogItem]:
         """Parse .view.lkml and .model.lkml files to extract measures, dimensions, dimension_groups, explores, and joins."""
@@ -127,9 +123,29 @@ class SemanticCatalogIndexer:
                     views = parsed.get("views", [])
                     for view in views:
                         view_name = view.get("name", lkml_path.stem.replace(".view", ""))
-                        table_name = self._resolve_physical_table(
-                            view_name, view.get("sql_table_name", view_name)
+                        table_name = self._strip_lookml_table_macro(
+                            view.get("sql_table_name", ""), view_name
                         )
+
+                        # Index derived_table (PDT) definition if present
+                        derived_table = view.get("derived_table")
+                        if isinstance(derived_table, dict) and derived_table.get("sql"):
+                            dt_cols = [d.get("name", "") for d in view.get("dimensions", []) if d.get("name")]
+                            items.append(
+                                CatalogItem(
+                                    id=f"view.{view_name}",
+                                    item_type="view",
+                                    name=view_name,
+                                    view=view_name,
+                                    description=(
+                                        f"LookML Persistent Derived Table (PDT) '{view_name}' registered in DuckDB. "
+                                        f"Available columns: {', '.join(dt_cols)}"
+                                    ),
+                                    sql_formula=f"SELECT * FROM {view_name}",
+                                    table_name=view_name,
+                                    examples=[f"Query {view_name}", f"Analyze category velocity in {view_name}"],
+                                )
+                            )
 
                         # Standard Dimensions (including CASE dimensions)
                         for dim in view.get("dimensions", []):
@@ -261,6 +277,9 @@ class SemanticCatalogIndexer:
         items: List[CatalogItem] = []
         tables = [
             ("master_records", settings.silver_records_path, "Cleaned transaction ledger with accounts, categories, and amounts"),
+            ("dim_accounts", settings.silver_accounts_path, "Conformed financial accounts dimension with balances, credit limits, and active status"),
+            ("dim_categories", settings.silver_categories_path, "Conformed spend and income categories dimension with parent hierarchy and cardinality"),
+            ("dim_labels", settings.silver_labels_path, "Conformed transaction labels/tags dimension with cumulative inflows and outflows"),
             ("fx_rates", settings.silver_fx_path, "Daily foreign exchange conversion rates (USD, EUR, COP, GBP)"),
             ("mart_monthly_pnl", settings.gold_pnl_path, "Pre-aggregated monthly P&L financial mart with net cashflow and savings rate"),
             ("mart_expense_summary", settings.gold_expense_summary_path, "Monthly expense breakdown with budget caps and variances"),

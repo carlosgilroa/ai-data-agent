@@ -42,6 +42,18 @@ class Settings(BaseSettings):
         return self.WALLET_DATA_DIR / "silver" / "master_records.parquet"
 
     @property
+    def silver_accounts_path(self) -> Path:
+        return self.WALLET_DATA_DIR / "silver" / "dim_accounts.parquet"
+
+    @property
+    def silver_categories_path(self) -> Path:
+        return self.WALLET_DATA_DIR / "silver" / "dim_categories.parquet"
+
+    @property
+    def silver_labels_path(self) -> Path:
+        return self.WALLET_DATA_DIR / "silver" / "dim_labels.parquet"
+
+    @property
     def silver_fx_path(self) -> Path:
         return self.WALLET_DATA_DIR / "silver" / "fx_rates.parquet"
 

@@ -25,10 +25,14 @@ def search_data_catalog(
             threshold = min_similarity if min_similarity is not None else settings.RAG_MIN_SIMILARITY
             return (
                 f"No catalog items matched query: '{query}' above similarity threshold ({threshold}). "
-                "Available physical tables: master_records, fx_rates, mart_monthly_pnl, mart_expense_summary."
+                "Available tables: master_records, dim_accounts, dim_categories, dim_labels, fx_rates, "
+                "mart_monthly_pnl, mart_expense_summary, pdt_category_mom_velocity."
             )
 
         formatted_docs = []
+        matched_ids = {item.id for item in items}
+        referenced_tables: List[str] = []
+
         for i, item in enumerate(items, 1):
             formula = f" | SQL: {item.sql_formula}" if item.sql_formula else ""
             table = f" | Table: {item.table_name}" if item.table_name else ""
@@ -41,6 +45,22 @@ def search_data_catalog(
                 f"[{i}] {item.name} ({item.item_type} in {item.view}{table}{formula}{score_info})\n"
                 f"    Description: {item.description}"
             )
+            if item.table_name and item.table_name not in referenced_tables:
+                referenced_tables.append(item.table_name)
+
+        # Attach physical/derived table column schemas for referenced tables so the agent never guesses column names
+        schema_footers = []
+        for tbl in referenced_tables:
+            tbl_id = f"table.{tbl}"
+            view_id = f"view.{tbl}"
+            if tbl_id in matched_ids or view_id in matched_ids:
+                continue
+            tbl_item = vector_store.get_by_id(tbl_id) or vector_store.get_by_id(view_id)
+            if tbl_item:
+                schema_footers.append(f"[Table Schema: {tbl}] {tbl_item.description}")
+
+        if schema_footers:
+            formatted_docs.append("\n".join(schema_footers))
 
         return "\n\n".join(formatted_docs)
     except Exception as e:

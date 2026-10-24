@@ -25,7 +25,8 @@ To prevent metric drift and hallucinated aggregations, `ai-data-agent` establish
 |  2. Parse View Dimensions, Dimension Groups (timeframes) & CASE statements       |
 |  3. Parse View Measures with aggregation wrappers (SUM/COUNT/AVG) & filters__all |
 |  4. Parse Model Explores & Relational Joins (sql_on, relationship, type)         |
-|  5. Resolve LookML views to physical DuckDB tables (master_records, marts, fx)   |
+|  5. Strip @{schema_name}. macro & register LookML PDTs (pdt_category_mom_velocity)|
+|  6. Index 7 Physical DuckDB Parquet Tables (master_records, dims, fx, marts)     |
 +------------------------------------------+---------------------------------------+
                                            |
                                            | Cosine Space Indexing (hnsw:space="cosine")
@@ -64,8 +65,10 @@ The indexer uses the Python `lkml` parser to extract complete semantic metadata 
      ```
 4. **Models, Explores & Relational Joins (`models/**/*.model.lkml`)**:
    - Extracts `explores` and `joins` including `sql_on`, `relationship` (`many_to_one`), and `type` (`left_outer`).
-5. **Physical Lakehouse Table Resolution**:
-   - Resolves logical LookML views (`fct_transactions`, `dim_categories`, `dim_accounts`, `dim_fx_rates`, `pdt_monthly_cashflow`) to their physical DuckDB Parquet tables (`master_records`, `mart_expense_summary`, `fx_rates`, `mart_monthly_pnl`).
+5. **Direct `sql_table_name` Binding & Persistent Derived Tables (PDTs)**:
+   - Strips LookML project macro prefixes (e.g. `` `@{schema_name}.dim_accounts` `` $\rightarrow$ `dim_accounts`) via `_strip_lookml_table_macro()`, mapping every LookML view 1:1 to its physical Parquet table (`master_records`, `dim_accounts`, `dim_categories`, `dim_labels`, `fx_rates`, `mart_monthly_pnl`, `mart_expense_summary`) without hardcoded view-resolution dicts.
+   - Extracts LookML `derived_table` definitions (`pdt_category_mom_velocity`) as `view` catalog items and compiles them directly as DuckDB SQL views.
+   - When `search_data_catalog` returns matched dimensions or metrics, it automatically appends the physical column schema (`[Table Schema: <table_name>]`) for each referenced table so the LLM never guesses column names.
 
 ---
 

@@ -37,9 +37,10 @@ flowchart TD
         subgraph StorageEngine ["Local Parquet Lakehouse Engine"]
             DuckDBTool --> DuckDB["DuckDB In-Memory Engine"]
             DuckDB --> MasterRecords["silver/master_records.parquet"]
+            DuckDB --> DimTables["silver/dim_accounts | dim_categories | dim_labels"]
             DuckDB --> FXRates["silver/fx_rates.parquet"]
-            DuckDB --> GoldPnL["gold/mart_monthly_pnl.parquet"]
-            DuckDB --> GoldExpense["gold/mart_expense_summary.parquet"]
+            DuckDB --> GoldMarts["gold/mart_monthly_pnl | mart_expense_summary"]
+            DuckDB --> LookMLPDT["LookML PDT: pdt_category_mom_velocity"]
         end
     end
 
@@ -62,8 +63,9 @@ flowchart TD
    - In-process execution directly against local Parquet files, executing queries in **<10 ms**.
    - Native row serialization without pandas dependency, ensuring maximum speed and zero environment conflicts.
 4. **LookML as Single Source of Truth & Cosine Similarity Filtering**:
-   - Wipes ChromaDB clean (`vector_store.clear()`) on every re-index and uses the native `lkml` parser to extract measures (with `filters__all` and aggregation wrappers), dimensions, `dimension_groups`, `CASE` statements, explores, and joins from `projects/wallet-lookml`.
-   - Computes cosine similarity (`1 - distance`) and filters out low-relevance noise below `RAG_MIN_SIMILARITY = 0.28`.
+   - Wipes ChromaDB clean (`vector_store.clear()`) on every re-index and uses the native `lkml` parser to extract measures (with `filters__all` and aggregation wrappers), dimensions, `dimension_groups`, `CASE` statements, derived tables (`pdt_category_mom_velocity`), explores, and joins from `projects/wallet-lookml`.
+   - Maps LookML `sql_table_name` definitions directly (via `_strip_lookml_table_macro`) to the 7 physical Parquet lakehouse tables (`master_records`, `dim_accounts`, `dim_categories`, `dim_labels`, `fx_rates`, `mart_monthly_pnl`, `mart_expense_summary`) without hardcoded view-resolution heuristics.
+   - Computes cosine similarity (`1 - distance`), filters out low-relevance noise below `RAG_MIN_SIMILARITY = 0.28`, and attaches the physical column schemas of referenced tables directly to `search_data_catalog` results.
 5. **Safe AST-Guarded SQL Execution**:
    - Strict read-only enforcement allowing only `SELECT` and `WITH` statements.
    - Regex-based AST safety blocking mutation keywords (`DROP`, `DELETE`, `INSERT`, `ALTER`, `ATTACH`).
@@ -194,9 +196,13 @@ python -m pytest tests -v
   "duckdb_connected": true,
   "tables_available": [
     "master_records",
+    "dim_accounts",
+    "dim_categories",
+    "dim_labels",
     "fx_rates",
     "mart_monthly_pnl",
-    "mart_expense_summary"
+    "mart_expense_summary",
+    "pdt_category_mom_velocity"
   ],
   "vector_store_ready": true,
   "gemini_configured": false

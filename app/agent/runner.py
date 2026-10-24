@@ -34,8 +34,9 @@ def search_data_catalog(query: str) -> str:
 
 @tool
 def run_sql_query(sql: str) -> str:
-    """Execute a safe read-only SQL query against local DuckDB lakehouse tables
-    (master_records, fx_rates, mart_monthly_pnl, mart_expense_summary).
+    """Execute a safe read-only SQL query against local DuckDB lakehouse tables and LookML PDTs
+    (master_records, dim_accounts, dim_categories, dim_labels, fx_rates, mart_monthly_pnl,
+    mart_expense_summary, pdt_category_mom_velocity).
     Returns columns, row count, and sample data rows.
     """
     try:
@@ -294,9 +295,9 @@ class AgentRunner:
                     )
                 elif tool_name == "run_sql_query" and "run_sql_query" in allowed_tool_names:
                     sql_arg = tool_args.get("sql", "")
-                    last_sql_executed = sql_arg
                     try:
                         sql_res = duckdb_tool.run_query(sql_arg)
+                        last_sql_executed = sql_arg
                         last_sql_data = sql_res.get("data", [])
                         tool_output = json.dumps({
                             "columns": sql_res.get("columns", []),
@@ -305,6 +306,8 @@ class AgentRunner:
                             "rows": last_sql_data[:15]
                         }, default=str)
                     except Exception as e:
+                        if last_sql_executed is None:
+                            last_sql_executed = sql_arg
                         tool_output = f"DuckDB Execution Error: {str(e)}"
 
                     thought_steps.append(

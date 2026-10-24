@@ -117,7 +117,7 @@ Conversational memory enables natural back-and-forth financial exploration:
 
 1. **Read-Only Enforced**:
    - AST token inspection rejects any query containing mutating keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`, `REPLACE`, `TRUNCATE`, `GRANT`, `REVOKE`, `VACUUM`).
-2. **Table Whitelist**:
-   - Queries can only access verified lakehouse tables registered as views (`master_records`, `fx_rates`, `mart_monthly_pnl`, `mart_expense_summary`).
+2. **Table & Derived View Whitelist**:
+   - Queries can access the 7 verified lakehouse Parquet tables (`master_records`, `dim_accounts`, `dim_categories`, `dim_labels`, `fx_rates`, `mart_monthly_pnl`, `mart_expense_summary`) plus LookML Persistent Derived Tables compiled in DuckDB (`pdt_category_mom_velocity`).
 3. **Pure Python DuckDB Execution**:
    - Native `.fetchall()` bindings ensure a fast, pandas-free memory footprint.

@@ -27,13 +27,17 @@ def test_indexer_execution():
     assert res["tables"] > 0
 
     all_ids = {item.id for item in res["items"]}
-    # Confirm orphaned item and removed hardcoded fallback item are absent
+    # Confirm orphaned item is wiped clean
     assert "dim_categories.stale_orphan_test" not in all_ids
-    assert "dim_categories.category_group" not in all_ids
 
-    # Confirm LookML filters__all and aggregation wrapper are extracted
+    # Confirm LookML filters__all, aggregation wrapper, and exact physical table_name bindings
     items_by_id = {item.id: item for item in res["items"]}
-    spend_metric = items_by_id.get("fct_transactions.total_spend_usd")
+    assert items_by_id["dim_categories.category_group"].table_name == "dim_categories"
+    assert items_by_id["dim_accounts.account_id"].table_name == "dim_accounts"
+    assert items_by_id["dim_labels.label_name"].table_name == "dim_labels"
+    assert "view.pdt_category_mom_velocity" in items_by_id
+
+    spend_metric = items_by_id.get("fct_transactions.total_spend_cop")
     assert spend_metric is not None
     assert "SUM(" in (spend_metric.sql_formula or "")
     assert "is_transfer = no" in spend_metric.description
