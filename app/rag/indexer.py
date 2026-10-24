@@ -17,6 +17,7 @@ class SemanticCatalogIndexer:
     def __init__(self):
         self.lookml_dir = Path(settings.LOOKML_DIR)
         self.data_dir = Path(settings.WALLET_DATA_DIR)
+        self._view_meta: Dict[str, Dict[str, Any]] = {}
 
     @staticmethod
     def _extract_measure_filters(measure: Dict[str, Any]) -> List[str]:
@@ -127,20 +128,36 @@ class SemanticCatalogIndexer:
                             view.get("sql_table_name", ""), view_name
                         )
 
+                        # Capture LookML grain description and primary key for lakehouse table metadata
+                        view_desc = view.get("description", "")
+                        pk_dim = next(
+                            (
+                                d.get("name")
+                                for d in view.get("dimensions", [])
+                                if str(d.get("primary_key", "")).lower() in ("yes", "true")
+                            ),
+                            None,
+                        )
+                        self._view_meta[table_name] = {
+                            "grain": view_desc,
+                            "primary_key": pk_dim,
+                        }
+
                         # Index derived_table (PDT) definition if present
                         derived_table = view.get("derived_table")
                         if isinstance(derived_table, dict) and derived_table.get("sql"):
                             dt_cols = [d.get("name", "") for d in view.get("dimensions", []) if d.get("name")]
+                            pdt_desc_parts = [view_desc or f"LookML Persistent Derived Table (PDT) '{view_name}' registered in DuckDB."]
+                            if pk_dim:
+                                pdt_desc_parts.append(f"Primary Key: {pk_dim}")
+                            pdt_desc_parts.append(f"Available columns: {', '.join(dt_cols)}")
                             items.append(
                                 CatalogItem(
                                     id=f"view.{view_name}",
                                     item_type="view",
                                     name=view_name,
                                     view=view_name,
-                                    description=(
-                                        f"LookML Persistent Derived Table (PDT) '{view_name}' registered in DuckDB. "
-                                        f"Available columns: {', '.join(dt_cols)}"
-                                    ),
+                                    description=" | ".join(pdt_desc_parts),
                                     sql_formula=f"SELECT * FROM {view_name}",
                                     table_name=view_name,
                                     examples=[f"Query {view_name}", f"Analyze category velocity in {view_name}"],
@@ -291,16 +308,56 @@ class SemanticCatalogIndexer:
                 continue
             try:
                 # Use native fetchall() without pandas
-                res = conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{file_path.as_posix()}')").fetchall()
+                posix_path = file_path.as_posix()
+                res = conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{posix_path}')").fetchall()
+                col_names = [row[0] for row in res]
                 cols = [f"{row[0]} ({row[1]})" for row in res]
+
+                # Dynamic statistics: row count & date coverage
+                total_rows = conn.execute(f"SELECT COUNT(*) FROM read_parquet('{posix_path}')").fetchone()[0]
+
+                date_info = ""
+                if "year_month" in col_names:
+                    try:
+                        min_ym, max_ym = conn.execute(
+                            f"SELECT MIN(year_month), MAX(year_month) FROM read_parquet('{posix_path}')"
+                        ).fetchone()
+                        if min_ym and max_ym:
+                            date_info = f"Date Coverage: {min_ym} to {max_ym}"
+                    except Exception:
+                        pass
+                elif "date" in col_names:
+                    try:
+                        min_dt, max_dt = conn.execute(
+                            f"SELECT MIN(date), MAX(date) FROM read_parquet('{posix_path}')"
+                        ).fetchone()
+                        if min_dt and max_dt:
+                            date_info = f"Date Coverage: {min_dt} to {max_dt}"
+                    except Exception:
+                        pass
+
+                view_meta = self._view_meta.get(table_name, {})
+                grain_desc = view_meta.get("grain") or desc
+                pk_name = view_meta.get("primary_key")
+
+                desc_parts = [grain_desc]
+                if pk_name:
+                    desc_parts.append(f"Primary Key: {pk_name}")
+                desc_parts.append(f"Stats: {total_rows:,} rows")
+                if date_info:
+                    desc_parts.append(date_info)
+                desc_parts.append(f"Available columns: {', '.join(cols)}")
+
+                full_desc = " | ".join(desc_parts)
+
                 items.append(
                     CatalogItem(
                         id=f"table.{table_name}",
                         item_type="table",
                         name=table_name,
                         view=table_name,
-                        description=f"{desc}. Available columns: {', '.join(cols)}",
-                        sql_formula=f"read_parquet('{file_path.as_posix()}')",
+                        description=full_desc,
+                        sql_formula=f"read_parquet('{posix_path}')",
                         table_name=table_name,
                         examples=[f"Query {table_name}", f"Inspect data in {table_name}"]
                     )

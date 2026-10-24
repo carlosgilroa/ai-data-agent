@@ -299,12 +299,23 @@ class AgentRunner:
                         sql_res = duckdb_tool.run_query(sql_arg)
                         last_sql_executed = sql_arg
                         last_sql_data = sql_res.get("data", [])
-                        tool_output = json.dumps({
+                        total_rows = sql_res.get("row_count", 0)
+                        preview_limit = 15
+                        preview_rows = min(total_rows, preview_limit)
+
+                        payload = {
                             "columns": sql_res.get("columns", []),
-                            "row_count": sql_res.get("row_count", 0),
+                            "total_rows_returned": total_rows,
+                            "preview_rows": preview_rows,
                             "execution_time_ms": sql_res.get("execution_time_ms", 0),
-                            "rows": last_sql_data[:15]
-                        }, default=str)
+                            "rows": last_sql_data[:preview_limit],
+                        }
+                        if total_rows > preview_limit:
+                            payload["notice"] = (
+                                f"Query returned {total_rows} total rows. Showing first {preview_limit} preview rows. "
+                                "For complete category totals or summaries, execute an aggregated SQL query (GROUP BY and SUM/COUNT)."
+                            )
+                        tool_output = json.dumps(payload, default=str)
                     except Exception as e:
                         if last_sql_executed is None:
                             last_sql_executed = sql_arg

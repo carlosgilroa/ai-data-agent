@@ -70,6 +70,13 @@ The indexer uses the Python `lkml` parser to extract complete semantic metadata 
    - Extracts LookML `derived_table` definitions (`pdt_category_mom_velocity`) as `view` catalog items and compiles them directly as DuckDB SQL views.
    - When `search_data_catalog` returns matched dimensions or metrics, it automatically appends the physical column schema (`[Table Schema: <table_name>]`) for each referenced table so the LLM never guesses column names.
 
+6. **Dynamic Table Statistics & Truncation Observability**:
+   - At indexing time, DuckDB dynamically inspects each Parquet table to capture total row count (`COUNT(*)`) and temporal bounds (`MIN/MAX` over `date` or `year_month`), combining them with the LookML view's declared grain and primary key:
+     ```text
+     [Table Schema: mart_expense_summary] Monthly expense summary segmented by accounting tier, category, merchant, and labels. Grain: 1 row per year_month + tier_group + category_name + merchant + labels. | Primary Key: expense_summary_pk | Stats: 550 rows | Date Coverage: 2026-01 to 2026-10 | Available columns: ...
+     ```
+   - In `run_sql_query`, the tool response explicitly returns `total_rows_returned` and `preview_rows`. If total rows exceed the preview limit, a notice informs the model to use aggregated SQL (`GROUP BY` and `SUM/COUNT`) rather than computing sums on truncated preview samples.
+
 ---
 
 ## 3. Cosine Similarity Scoring & Relevancy Cutoff (`app/rag/store.py`)

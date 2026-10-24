@@ -48,6 +48,14 @@ def test_indexer_execution():
     assert tx_type_dim is not None
     assert "CASE WHEN" in (tx_type_dim.sql_formula or "")
 
+    # Confirm table metadata has grain, primary key, and dynamic stats
+    exp_table = items_by_id.get("table.mart_expense_summary")
+    assert exp_table is not None
+    assert "Grain:" in exp_table.description
+    assert "Primary Key: expense_summary_pk" in exp_table.description
+    assert "Stats:" in exp_table.description
+    assert "Date Coverage:" in exp_table.description
+
 
 def test_vector_store_search_and_similarity_cutoff():
     """Verify cosine similarity scores are attached and noise below min_similarity is filtered out."""
