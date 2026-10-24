@@ -1,7 +1,7 @@
 import time
 import logging
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.tools import tool
 from app.core.config import settings
@@ -9,6 +9,7 @@ from app.schemas.query import QueryRequest, QueryResponse, AgentThoughtStep
 from app.agent.tools.duckdb_tool import duckdb_tool
 from app.agent.tools.rag_tool import search_data_catalog as raw_search_catalog
 from app.agent.prompts import AGENT_SYSTEM_PROMPT
+from app.agent.router import intent_router
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,11 @@ def search_data_catalog(query: str) -> str:
     how financial metrics (like total spend, net cashflow, savings rate, burn rate) are defined or what
     tables and columns exist.
     """
-    return raw_search_catalog(query, top_k=5)
+    return raw_search_catalog(
+        query,
+        top_k=settings.RAG_TOP_K,
+        min_similarity=settings.RAG_MIN_SIMILARITY,
+    )
 
 
 @tool
@@ -50,13 +55,20 @@ def run_sql_query(sql: str) -> str:
         return f"DuckDB Execution Error: {str(e)}"
 
 
+TOOL_REGISTRY = {
+    "search_data_catalog": search_data_catalog,
+    "run_sql_query": run_sql_query,
+}
+
+
 # -------------------------------------------------------------------------
-# Autonomous ReAct Agent Runner
+# Autonomous ReAct Agent Runner with Two-Step Intent Routing
 # -------------------------------------------------------------------------
 
 class AgentRunner:
-    """Autonomous tool-calling ReAct agent orchestrating LookML catalog RAG,
-    multi-step LLM reasoning, conversational session memory, and safe DuckDB analytical execution.
+    """Autonomous tool-calling ReAct agent orchestrating two-step intent routing,
+    LookML catalog RAG, multi-step LLM reasoning, conversational session memory,
+    and safe DuckDB analytical execution.
     """
 
     def __init__(self):
@@ -66,24 +78,22 @@ class AgentRunner:
         self.llm_with_tools = None
         self.init_error = None
         self.sessions: Dict[str, List[Any]] = {}
+        self._model_cache: Dict[str, Any] = {}
         self._init_llm()
 
     def _init_llm(self):
-        """Initialize LangChain ChatGoogleGenerativeAI and bind tools if API key is provided."""
+        """Initialize default LangChain ChatGoogleGenerativeAI and bind tools if API key is provided."""
         self.api_key = settings.GEMINI_API_KEY
         self.model_name = settings.GEMINI_MODEL
         self.init_error = None
+        self._model_cache.clear()
 
         if self.api_key and self.api_key.strip() not in ("", "your_gemini_api_key_here"):
             try:
-                from langchain_google_genai import ChatGoogleGenerativeAI
-                self.llm = ChatGoogleGenerativeAI(
-                    model=self.model_name,
-                    google_api_key=self.api_key,
-                    temperature=0.1
+                self.llm, self.llm_with_tools = self._get_or_create_llm(
+                    self.model_name, ["search_data_catalog", "run_sql_query"]
                 )
-                self.llm_with_tools = self.llm.bind_tools([search_data_catalog, run_sql_query])
-                logger.info("Initialized Gemini autonomous ReAct agent with model %s and bound tools", self.model_name)
+                logger.info("Initialized Gemini autonomous ReAct agent with default model %s", self.model_name)
             except Exception as e:
                 self.init_error = str(e)
                 self.llm = None
@@ -94,17 +104,47 @@ class AgentRunner:
             self.llm_with_tools = None
             logger.info("No GEMINI_API_KEY configured. Autonomous tool-calling agent requires a valid key.")
 
+    def _get_or_create_llm(self, model_name: str, allowed_tool_names: List[str]) -> Tuple[Any, Any]:
+        """Retrieve or create a cached ChatGoogleGenerativeAI instance and bind requested tools."""
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        if model_name not in self._model_cache:
+            llm_kwargs: Dict[str, Any] = {
+                "model": model_name,
+                "google_api_key": self.api_key,
+            }
+            if "3.5-flash-lite" not in model_name:
+                llm_kwargs["temperature"] = 0.1
+            self._model_cache[model_name] = ChatGoogleGenerativeAI(**llm_kwargs)
+        base_llm = self._model_cache[model_name]
+        tools_to_bind = [TOOL_REGISTRY[name] for name in allowed_tool_names if name in TOOL_REGISTRY]
+        bound_llm = base_llm.bind_tools(tools_to_bind) if tools_to_bind else base_llm
+        return base_llm, bound_llm
+
+    @staticmethod
+    def _extract_text(content: Any) -> str:
+        """Normalize LangChain AIMessage content into a clean string."""
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = [
+                item.get("text", "") if isinstance(item, dict) else str(item)
+                for item in content
+            ]
+            return "".join(parts).strip()
+        return str(content).strip()
+
     def run_query(self, request: QueryRequest) -> QueryResponse:
-        """Execute autonomous ReAct loop:
+        """Execute two-step routed ReAct loop:
         1. Check API key presence.
-        2. LLM autonomously invokes search_data_catalog and/or run_sql_query.
-        3. If DuckDB returns SQL error, LLM self-corrects.
-        4. LLM synthesizes grounded final financial answer.
+        2. Classify user intent via IntentRouter (gemini-3.1-flash-lite).
+        3. Route to target model & iteration budget (0, 1, 3, or 6 steps).
+        4. Synthesize grounded final answer.
         """
         start_time = time.time()
 
         # Re-check API key in case settings were updated dynamically
-        if self.llm_with_tools is None:
+        if self.llm_with_tools is None and settings.GEMINI_API_KEY == self.api_key:
             self._init_llm()
 
         if not self.api_key or self.api_key.strip() in ("", "your_gemini_api_key_here"):
@@ -124,6 +164,39 @@ class AgentRunner:
         last_sql_data: List[Dict[str, Any]] = []
 
         session_id = request.session_id.strip() if (request.session_id and request.session_id.strip()) else None
+        has_session_context = bool(session_id and session_id in self.sessions)
+
+        # -----------------------------------------------------------------
+        # Step 1: Two-Step Intent Router Classification (gemini-3.1-flash-lite)
+        # -----------------------------------------------------------------
+        decision = intent_router.classify(request.query, has_session_context=has_session_context)
+        target_model, max_iterations, allowed_tool_names = intent_router.get_route_config(decision.intent)
+
+        step_counter = 1
+        thought_steps.append(
+            AgentThoughtStep(
+                step_number=step_counter,
+                tool="intent_router",
+                tool_input={
+                    "query": request.query,
+                    "router_model": settings.GEMINI_ROUTER_MODEL,
+                },
+                tool_output={
+                    "intent": decision.intent,
+                    "target_model": target_model,
+                    "max_iterations": max_iterations,
+                    "allowed_tools": allowed_tool_names,
+                    "reasoning": decision.reasoning,
+                },
+                thought=(
+                    f"Router ({settings.GEMINI_ROUTER_MODEL}) classified intent as '{decision.intent}' "
+                    f"({decision.reasoning}) -> routed to '{target_model}' with max_iterations={max_iterations}"
+                ),
+            )
+        )
+        step_counter += 1
+
+        base_llm, routed_llm_with_tools = self._get_or_create_llm(target_model, allowed_tool_names)
 
         # Multi-turn session memory retrieval
         if session_id and session_id in self.sessions:
@@ -135,25 +208,52 @@ class AgentRunner:
                 HumanMessage(content=request.query)
             ]
 
-        step_counter = 1
-        max_iterations = 8
+        # -----------------------------------------------------------------
+        # Step 2A: Out-of-Scope Handling (0 tool steps, separate LLM call)
+        # -----------------------------------------------------------------
+        if decision.intent == "out_of_scope" or max_iterations == 0:
+            oos_messages = [
+                SystemMessage(
+                    content=(
+                        "You are a specialized personal finance and data lakehouse AI assistant. "
+                        "Politely decline the user's question because it is outside the scope of "
+                        "personal finance, accounting, and lakehouse analytics, and briefly remind "
+                        "them what financial questions you can help answer."
+                    )
+                ),
+                HumanMessage(content=request.query),
+            ]
+            ai_msg = base_llm.invoke(oos_messages)
+            answer = self._extract_text(ai_msg.content)
 
+            if session_id:
+                messages.append(AIMessage(content=answer))
+                if len(messages) > 15:
+                    messages = [messages[0]] + messages[-14:]
+                self.sessions[session_id] = messages
+
+            duration_ms = round((time.time() - start_time) * 1000, 2)
+            return QueryResponse(
+                query=request.query,
+                intent=decision.intent,
+                model_used=target_model,
+                answer=answer,
+                sql=None,
+                data=[],
+                thought_steps=thought_steps if request.explain else [],
+                execution_time_ms=duration_ms,
+            )
+
+        # -----------------------------------------------------------------
+        # Step 2B: Tool-Calling ReAct Loop (capabilities=1, simple=3, complex=6)
+        # -----------------------------------------------------------------
         for _ in range(max_iterations):
-            ai_msg = self.llm_with_tools.invoke(messages)
+            ai_msg = routed_llm_with_tools.invoke(messages)
             messages.append(ai_msg)
 
             # If no tool calls were requested, the model has completed its final answer
             if not ai_msg.tool_calls:
-                if isinstance(ai_msg.content, str):
-                    answer = ai_msg.content
-                elif isinstance(ai_msg.content, list):
-                    text_parts = [
-                        item.get("text", "") if isinstance(item, dict) else str(item)
-                        for item in ai_msg.content
-                    ]
-                    answer = "".join(text_parts).strip()
-                else:
-                    answer = str(ai_msg.content).strip()
+                answer = self._extract_text(ai_msg.content)
 
                 # Update session history with sliding window
                 if session_id:
@@ -164,6 +264,8 @@ class AgentRunner:
                 duration_ms = round((time.time() - start_time) * 1000, 2)
                 return QueryResponse(
                     query=request.query,
+                    intent=decision.intent,
+                    model_used=target_model,
                     answer=answer,
                     sql=last_sql_executed,
                     data=last_sql_data if request.explain else [],
@@ -177,9 +279,9 @@ class AgentRunner:
                 tool_args = tc.get("args") or {}
                 tool_id = tc.get("id")
 
-                thought_text = f"Agent decided to invoke tool '{tool_name}' with parameters: {tool_args}"
+                thought_text = f"Agent ({target_model}) decided to invoke tool '{tool_name}' with parameters: {tool_args}"
 
-                if tool_name == "search_data_catalog":
+                if tool_name == "search_data_catalog" and "search_data_catalog" in allowed_tool_names:
                     tool_output = search_data_catalog.invoke(tool_args)
                     thought_steps.append(
                         AgentThoughtStep(
@@ -190,7 +292,7 @@ class AgentRunner:
                             thought=thought_text
                         )
                     )
-                elif tool_name == "run_sql_query":
+                elif tool_name == "run_sql_query" and "run_sql_query" in allowed_tool_names:
                     sql_arg = tool_args.get("sql", "")
                     last_sql_executed = sql_arg
                     try:
@@ -215,32 +317,40 @@ class AgentRunner:
                         )
                     )
                 else:
-                    tool_output = f"Error: Unknown tool '{tool_name}'."
+                    tool_output = f"Error: Tool '{tool_name}' is not permitted for intent '{decision.intent}'."
                     thought_steps.append(
                         AgentThoughtStep(
                             step_number=step_counter,
                             tool=tool_name or "unknown",
                             tool_input=tool_args,
                             tool_output=tool_output,
-                            thought=f"Attempted unknown tool '{tool_name}'"
+                            thought=f"Attempted disallowed or unknown tool '{tool_name}'"
                         )
                     )
 
                 step_counter += 1
                 messages.append(ToolMessage(content=str(tool_output), tool_call_id=tool_id))
 
-        # If max iterations reached, invoke LLM once more to force synthesis from gathered context
+        # If max iterations reached, invoke LLM with tool_choice='none' (preserving tool declarations for Gemini history) to force synthesis
         try:
-            messages.append(HumanMessage(content="Please synthesize your final analytical answer now based on the query results retrieved above. Do not call any more tools."))
-            final_msg = self.llm.invoke(messages)
-            if isinstance(final_msg.content, str):
-                final_answer = final_msg.content.strip()
-            elif isinstance(final_msg.content, list):
-                final_answer = "".join([part.get("text", "") if isinstance(part, dict) else str(part) for part in final_msg.content]).strip()
-            else:
-                final_answer = str(final_msg.content).strip()
-        except Exception as e:
-            final_answer = f"Agent reached reasoning iteration limit. Last SQL executed: {last_sql_executed}"
+            messages.append(
+                HumanMessage(
+                    content="Please synthesize your final analytical answer now based on the context and results retrieved above. Do not call any more tools."
+                )
+            )
+            tools_to_bind = [TOOL_REGISTRY[name] for name in allowed_tool_names if name in TOOL_REGISTRY]
+            synthesis_llm = (
+                base_llm.bind_tools(tools_to_bind, tool_choice="none")
+                if tools_to_bind
+                else base_llm
+            )
+            final_msg = synthesis_llm.invoke(messages)
+            final_answer = self._extract_text(final_msg.content)
+            if not final_answer:
+                final_msg_fallback = routed_llm_with_tools.invoke(messages)
+                final_answer = self._extract_text(final_msg_fallback.content)
+        except Exception:
+            final_answer = f"Agent reached reasoning iteration limit ({max_iterations}). Last SQL executed: {last_sql_executed}"
 
         # Update session history with sliding window
         if session_id:
@@ -252,6 +362,8 @@ class AgentRunner:
         duration_ms = round((time.time() - start_time) * 1000, 2)
         return QueryResponse(
             query=request.query,
+            intent=decision.intent,
+            model_used=target_model,
             answer=final_answer,
             sql=last_sql_executed,
             data=last_sql_data if request.explain else [],

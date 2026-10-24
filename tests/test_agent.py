@@ -86,3 +86,29 @@ def test_session_clear_endpoint():
     data2 = response2.json()
     assert data2["cleared"] is False
 
+
+def test_intent_router_route_config():
+    """Verify two-step IntentRouter maps each intent to the expected model, step budget, and tools."""
+    from app.agent.router import intent_router
+
+    m_oos, steps_oos, tools_oos = intent_router.get_route_config("out_of_scope")
+    assert m_oos == settings.GEMINI_ROUTER_MODEL
+    assert steps_oos == 0
+    assert tools_oos == []
+
+    m_cap, steps_cap, tools_cap = intent_router.get_route_config("capabilities")
+    assert m_cap == settings.GEMINI_ROUTER_MODEL
+    assert steps_cap == 1
+    assert tools_cap == ["search_data_catalog"]
+
+    m_sim, steps_sim, tools_sim = intent_router.get_route_config("simple_query")
+    assert m_sim == settings.GEMINI_SIMPLE_MODEL
+    assert steps_sim == 3
+    assert tools_sim == ["search_data_catalog", "run_sql_query"]
+
+    m_cmp, steps_cmp, tools_cmp = intent_router.get_route_config("complex_query")
+    assert m_cmp == settings.GEMINI_MODEL
+    assert steps_cmp == 6
+    assert tools_cmp == ["search_data_catalog", "run_sql_query"]
+
+

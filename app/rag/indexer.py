@@ -1,7 +1,6 @@
-import os
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 import duckdb
 from app.core.config import settings
 from app.schemas.catalog import CatalogItem
@@ -19,16 +18,105 @@ class SemanticCatalogIndexer:
         self.lookml_dir = Path(settings.LOOKML_DIR)
         self.data_dir = Path(settings.WALLET_DATA_DIR)
 
-    def extract_from_lookml(self) -> List[CatalogItem]:
-        """Parse .view.lkml and .model.lkml files to extract measures, dimensions, explores, and joins."""
-        items: List[CatalogItem] = []
-        try:
-            import lkml
-        except ImportError:
-            logger.warning("lkml package not installed. Generating catalog from predefined LookML semantics.")
-            return self._get_fallback_lookml_catalog()
+    @staticmethod
+    def _extract_measure_filters(measure: Dict[str, Any]) -> List[str]:
+        """Extract filter key-value conditions from lkml 'filters__all' or 'filters' structures."""
+        filter_strs: List[str] = []
+        raw_filters_all = measure.get("filters__all", [])
+        for group in raw_filters_all:
+            if isinstance(group, list):
+                for item in group:
+                    if isinstance(item, dict):
+                        for k, v in item.items():
+                            filter_strs.append(f"{k} = {v}")
+            elif isinstance(group, dict):
+                for k, v in group.items():
+                    filter_strs.append(f"{k} = {v}")
 
-        # 1. Parse LookML Views (Measures & Dimensions)
+        if not filter_strs:
+            raw_filters = measure.get("filters", [])
+            if isinstance(raw_filters, list):
+                for item in raw_filters:
+                    if isinstance(item, dict):
+                        for k, v in item.items():
+                            filter_strs.append(f"{k} = {v}")
+            elif isinstance(raw_filters, dict):
+                for k, v in raw_filters.items():
+                    filter_strs.append(f"{k} = {v}")
+
+        return filter_strs
+
+    @staticmethod
+    def _format_measure_sql(measure: Dict[str, Any], filter_strs: List[str]) -> str:
+        """Format measure SQL formula with its LookML aggregation type and filter clause."""
+        m_type = (measure.get("type") or "number").lower()
+        raw_sql = (measure.get("sql") or "").strip()
+
+        agg_map = {
+            "sum": "SUM",
+            "count": "COUNT",
+            "count_distinct": "COUNT(DISTINCT",
+            "average": "AVG",
+            "min": "MIN",
+            "max": "MAX",
+        }
+
+        if not raw_sql:
+            formula = "COUNT(*)" if m_type == "count" else f"{m_type.upper()}(*)"
+        elif m_type == "count_distinct":
+            formula = f"COUNT(DISTINCT {raw_sql})"
+        elif m_type in agg_map:
+            agg_fn = agg_map[m_type]
+            if raw_sql.upper().startswith(f"{agg_fn}("):
+                formula = raw_sql
+            else:
+                formula = f"{agg_fn}({raw_sql})"
+        else:
+            formula = raw_sql
+
+        if filter_strs:
+            formula = f"{formula} FILTER (WHERE {' AND '.join(filter_strs)})"
+        return formula
+
+    @staticmethod
+    def _format_dimension_sql(dim: Dict[str, Any]) -> str:
+        """Extract SQL expression or CASE WHEN statement from a LookML dimension."""
+        if dim.get("sql"):
+            return str(dim.get("sql")).strip()
+
+        case_block = dim.get("case")
+        if isinstance(case_block, dict):
+            when_parts = []
+            for w in case_block.get("whens", []):
+                if isinstance(w, dict) and w.get("sql") and w.get("label"):
+                    when_parts.append(f"WHEN {w['sql']} THEN '{w['label']}'")
+            else_label = case_block.get("else")
+            else_str = f" ELSE '{else_label}'" if else_label is not None else ""
+            if when_parts:
+                return f"CASE {' '.join(when_parts)}{else_str} END"
+
+        return f"${{TABLE}}.{dim.get('name', '')}"
+
+    @staticmethod
+    def _resolve_physical_table(view_name: str, raw_sql_table: str) -> str:
+        """Map LookML logical view / BigQuery table reference to physical DuckDB lakehouse table(s)."""
+        v_lower = (view_name or "").lower()
+        if "fx_rate" in v_lower:
+            return "fx_rates"
+        if "monthly_cashflow" in v_lower or "pnl" in v_lower:
+            return "mart_monthly_pnl"
+        if "categor" in v_lower:
+            return "master_records, mart_expense_summary"
+        if "transaction" in v_lower or "account" in v_lower:
+            return "master_records"
+        return raw_sql_table or view_name
+
+    def extract_from_lookml(self) -> List[CatalogItem]:
+        """Parse .view.lkml and .model.lkml files to extract measures, dimensions, dimension_groups, explores, and joins."""
+        items: List[CatalogItem] = []
+        import lkml
+
+        # 1. Parse LookML Views (Dimensions, Dimension Groups & Measures)
         views_dir = self.lookml_dir / "views"
         if views_dir.exists():
             for lkml_path in views_dir.glob("**/*.view.lkml"):
@@ -39,47 +127,74 @@ class SemanticCatalogIndexer:
                     views = parsed.get("views", [])
                     for view in views:
                         view_name = view.get("name", lkml_path.stem.replace(".view", ""))
-                        table_name = view.get("sql_table_name", view_name)
+                        table_name = self._resolve_physical_table(
+                            view_name, view.get("sql_table_name", view_name)
+                        )
 
-                        # Dimensions
+                        # Standard Dimensions (including CASE dimensions)
                         for dim in view.get("dimensions", []):
+                            dim_name = dim.get("name", "")
+                            dim_sql = self._format_dimension_sql(dim)
                             items.append(
                                 CatalogItem(
-                                    id=f"{view_name}.{dim.get('name')}",
+                                    id=f"{view_name}.{dim_name}",
                                     item_type="dimension",
-                                    name=dim.get("name", ""),
+                                    name=dim_name,
                                     view=view_name,
-                                    description=dim.get("description", f"Dimension {dim.get('name')} in {view_name}"),
-                                    sql_formula=dim.get("sql"),
+                                    description=dim.get("description", f"Dimension {dim_name} in {view_name}"),
+                                    sql_formula=dim_sql,
                                     table_name=table_name,
                                     examples=[
-                                        f"Filter or group by {dim.get('name')}",
-                                        f"Break down metrics by {dim.get('name')}"
+                                        f"Filter or group by {dim_name}",
+                                        f"Break down metrics by {dim_name}"
+                                    ]
+                                )
+                            )
+
+                        # Dimension Groups (Timeframes)
+                        for dgroup in view.get("dimension_groups", []):
+                            dg_name = dgroup.get("name", "")
+                            timeframes = dgroup.get("timeframes", [])
+                            dg_sql = dgroup.get("sql", f"${{TABLE}}.{dg_name}")
+                            tf_note = f" [Timeframes: {', '.join(timeframes)}]" if timeframes else ""
+                            dg_desc = dgroup.get("description", f"Time dimension group {dg_name} in {view_name}") + tf_note
+                            items.append(
+                                CatalogItem(
+                                    id=f"{view_name}.{dg_name}",
+                                    item_type="dimension",
+                                    name=dg_name,
+                                    view=view_name,
+                                    description=dg_desc,
+                                    sql_formula=dg_sql,
+                                    table_name=table_name,
+                                    examples=[
+                                        f"Filter or group by {dg_name} date/month/year",
+                                        f"Trend metrics over {dg_name}"
                                     ]
                                 )
                             )
 
                         # Measures
                         for measure in view.get("measures", []):
-                            desc = measure.get("description", f"Measure {measure.get('name')} in {view_name}")
-                            formula = measure.get("sql", f"{measure.get('type')}(*)")
-                            filters = measure.get("filters", [])
-                            if filters:
-                                filter_desc = " [Filters: " + ", ".join([f"{k} = {v}" for f in filters for k, v in f.items()]) + "]"
-                                desc += filter_desc
+                            m_name = measure.get("name", "")
+                            desc = measure.get("description", f"Measure {m_name} in {view_name}")
+                            filter_strs = self._extract_measure_filters(measure)
+                            if filter_strs:
+                                desc += f" [Filters: {', '.join(filter_strs)}]"
+                            formula = self._format_measure_sql(measure, filter_strs)
 
                             items.append(
                                 CatalogItem(
-                                    id=f"{view_name}.{measure.get('name')}",
+                                    id=f"{view_name}.{m_name}",
                                     item_type="metric",
-                                    name=measure.get("name", ""),
+                                    name=m_name,
                                     view=view_name,
                                     description=desc,
                                     sql_formula=formula,
                                     table_name=table_name,
                                     examples=[
-                                        f"Calculate {measure.get('name')}",
-                                        f"What is the {measure.get('name')}?"
+                                        f"Calculate {m_name}",
+                                        f"What is the {m_name}?"
                                     ]
                                 )
                             )
@@ -139,125 +254,7 @@ class SemanticCatalogIndexer:
                 except Exception as e:
                     logger.error("Error parsing LookML model file %s: %s", model_path, e)
 
-        if not items:
-            return self._get_fallback_lookml_catalog()
-
         return items
-
-    def _get_fallback_lookml_catalog(self) -> List[CatalogItem]:
-        """Curated semantic catalog extracted directly from the verified LookML semantic layer."""
-        return [
-            CatalogItem(
-                id="fct_transactions.total_spend_usd",
-                item_type="metric",
-                name="total_spend_usd",
-                view="fct_transactions",
-                description="Total cash outflow in USD (excluding transfers). Calculated as sum(abs(amount_usd)) where is_transfer = false and amount < 0.",
-                sql_formula="SUM(ABS(amount)) FILTER (WHERE is_transfer = false AND type = 'expense')",
-                table_name="master_records",
-                examples=["What were my total expenses in August?", "How much did I spend on living costs?"]
-            ),
-            CatalogItem(
-                id="fct_transactions.total_income_usd",
-                item_type="metric",
-                name="total_income_usd",
-                view="fct_transactions",
-                description="Total cash inflow in USD (excluding transfers). Calculated as sum(amount_usd) where is_transfer = false and amount > 0.",
-                sql_formula="SUM(amount) FILTER (WHERE is_transfer = false AND type = 'income')",
-                table_name="master_records",
-                examples=["What was my total income this month?", "How much money did I earn?"]
-            ),
-            CatalogItem(
-                id="fct_transactions.net_cash_flow_usd",
-                item_type="metric",
-                name="net_cash_flow_usd",
-                view="fct_transactions",
-                description="Net cash flow (Total Income - Total Spend) in USD. Essential KPI measuring monthly surplus or burn.",
-                sql_formula="total_income_usd - total_spend_usd",
-                table_name="mart_monthly_pnl",
-                examples=["What is my net cashflow?", "Did I save money in July?"]
-            ),
-            CatalogItem(
-                id="fct_transactions.tier1_operational_spend_usd",
-                item_type="metric",
-                name="tier1_operational_spend_usd",
-                view="fct_transactions",
-                description="Two-Tier Accounting: Essential routine living burn rate (Tier 1 Needs, rent, groceries, utilities). Filters: is_transfer = false, accounting_tier = 1.",
-                sql_formula="SUM(ABS(amount)) FILTER (WHERE tier_group LIKE '%Tier 1%')",
-                table_name="master_records",
-                examples=["What is my Tier 1 burn rate?", "How much do essential living expenses cost?"]
-            ),
-            CatalogItem(
-                id="fct_transactions.tier2_sinking_fund_spend_usd",
-                item_type="metric",
-                name="tier2_sinking_fund_spend_usd",
-                view="fct_transactions",
-                description="Two-Tier Accounting: Capital sinking funds, savings allocations, and irregular asset investments (Tier 2).",
-                sql_formula="SUM(ABS(amount)) FILTER (WHERE tier_group LIKE '%Tier 2%')",
-                table_name="master_records",
-                examples=["How much did I allocate to sinking funds?", "What was my Tier 2 capital expense?"]
-            ),
-            CatalogItem(
-                id="fct_transactions.savings_rate_percentage",
-                item_type="metric",
-                name="savings_rate_percentage",
-                view="fct_transactions",
-                description="Percentage of total income retained or allocated to Tier 2 capital funds. savings_rate = net_cashflow / operating_income * 100.",
-                sql_formula="net_cashflow / operating_income * 100",
-                table_name="mart_monthly_pnl",
-                examples=["What is my savings rate?", "Am I meeting my 30% savings rate target?"]
-            ),
-            CatalogItem(
-                id="dim_categories.category_group",
-                item_type="dimension",
-                name="category_group",
-                view="dim_categories",
-                description="High-level category classification (e.g. Housing, Food & Dining, Transportation, Utilities, Shopping, Financial).",
-                sql_formula="category_group",
-                table_name="master_records",
-                examples=["Break down spending by category group", "Top spending categories"]
-            ),
-            CatalogItem(
-                id="dim_accounts.account_class",
-                item_type="dimension",
-                name="account_class",
-                view="dim_accounts",
-                description="Classification of financial accounts: checking, savings, credit, cash, investment.",
-                sql_formula="account_class",
-                table_name="master_records",
-                examples=["Show balances by account class", "Spending on credit cards"]
-            ),
-            CatalogItem(
-                id="explore.fct_transactions",
-                item_type="explore",
-                name="fct_transactions",
-                view="fct_transactions",
-                description="Primary financial transactions ledger explore. Joins dim_accounts, dim_categories, and dim_fx_rates.",
-                sql_formula=None,
-                table_name="master_records",
-                examples=["Personal finance and cash flow ledger explore"]
-            ),
-            CatalogItem(
-                id="join.fct_transactions.dim_categories",
-                item_type="join",
-                name="fct_transactions -> dim_categories",
-                view="fct_transactions",
-                description="Join condition: ${fct_transactions.category_id} = ${dim_categories.category_id} (many_to_one). Connects transactions to Two-Tier accounting tiers.",
-                sql_formula="${fct_transactions.category_id} = ${dim_categories.category_id}",
-                table_name="dim_categories",
-                examples=["Join fct_transactions with dim_categories"]
-            ),
-            CatalogItem(
-                id="join.fct_transactions.dim_accounts",
-                item_type="join",
-                name="fct_transactions -> dim_accounts",
-                view="fct_transactions",
-                description="Join condition: ${fct_transactions.account_id} = ${dim_accounts.account_id} (many_to_one). Connects transactions to account classes.",
-                sql_formula="${fct_transactions.account_id} = ${dim_accounts.account_id}",
-                table_name="dim_accounts",
-                examples=["Join fct_transactions with dim_accounts"]
-            ),
-        ]
 
     def extract_from_lakehouse(self) -> List[CatalogItem]:
         """Inspect DuckDB Parquet schemas to index physical table structures without pandas dependency."""
@@ -295,7 +292,9 @@ class SemanticCatalogIndexer:
         return items
 
     def run_indexing(self) -> Dict[str, Any]:
-        """Execute full indexing pipeline and upsert into ChromaDB."""
+        """Wipe ChromaDB collection and execute full indexing pipeline from LookML and Lakehouse."""
+        vector_store.clear()
+
         lookml_items = self.extract_from_lookml()
         lakehouse_items = self.extract_from_lakehouse()
         all_items = lookml_items + lakehouse_items
@@ -309,7 +308,7 @@ class SemanticCatalogIndexer:
         tables_count = sum(1 for i in all_items if i.item_type == "table")
 
         logger.info(
-            "Indexing completed: %d total items (%d metrics, %d dimensions, %d explores, %d joins, %d tables)",
+            "Indexing completed (clean slate): %d total items (%d metrics, %d dimensions, %d explores, %d joins, %d tables)",
             len(all_items), metrics_count, dimensions_count, explores_count, joins_count, tables_count
         )
         return {

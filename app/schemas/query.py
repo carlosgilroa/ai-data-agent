@@ -1,5 +1,14 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 from pydantic import BaseModel, Field
+
+
+IntentType = Literal["out_of_scope", "capabilities", "simple_query", "complex_query"]
+
+
+class RouterDecision(BaseModel):
+    """Structured output returned by the Intent Router."""
+    intent: IntentType = Field(..., description="Classified query intent category")
+    reasoning: str = Field(..., description="Concise explanation for the chosen intent")
 
 
 class AgentThoughtStep(BaseModel):
@@ -21,6 +30,8 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     """Response returned by the AI Data Agent."""
     query: str = Field(..., description="Original user prompt")
+    intent: Optional[str] = Field(None, description="Classified user intent from the router")
+    model_used: Optional[str] = Field(None, description="Gemini model selected to execute the query")
     answer: str = Field(..., description="Natural language synthesized answer with financial insights")
     sql: Optional[str] = Field(None, description="The SQL query generated and executed against DuckDB")
     data: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Raw rows returned by the SQL execution")

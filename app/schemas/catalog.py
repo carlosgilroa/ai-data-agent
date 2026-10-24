@@ -33,6 +33,8 @@ class CatalogItem(BaseModel):
     sql_formula: Optional[str] = Field(None, description="Associated SQL code/formula")
     table_name: Optional[str] = Field(None, description="Physical parquet or BigQuery table")
     examples: List[str] = Field(default_factory=list, description="Sample user questions this item answers")
+    distance: Optional[float] = Field(None, description="Raw cosine distance from ChromaDB (0.0 = identical)")
+    similarity_score: Optional[float] = Field(None, description="Cosine similarity score (1.0 - distance)")
 
 
 class CatalogListResponse(BaseModel):

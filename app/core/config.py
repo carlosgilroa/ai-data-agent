@@ -16,9 +16,15 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
-    # Gemini LLM configuration (Google AI Studio / Pay-As-You-Go / Free Tier)
+    # Gemini LLM configuration & Multi-Tier Model Routing
     GEMINI_API_KEY: str = ""
+    GEMINI_ROUTER_MODEL: str = "gemini-3.1-flash-lite"
+    GEMINI_SIMPLE_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_MODEL: str = "gemini-3.8-flash"
+
+    # Semantic RAG Thresholds
+    RAG_TOP_K: int = 5
+    RAG_MIN_SIMILARITY: float = 0.28
 
     # Data paths (pointing to local lakehouse and semantic layer)
     WALLET_DATA_DIR: Path = Path("C:/projects/wallet/data")

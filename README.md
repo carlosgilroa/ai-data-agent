@@ -50,9 +50,9 @@ flowchart TD
 
 ## Key Features
 
-1. **Autonomous ReAct Tool-Calling Loop**:
-   - Binds first-class LangChain tools (`search_data_catalog`, `run_sql_query`) directly to **Gemini** (`gemini-3.8-flash`).
-   - Dynamically inspects LookML definitions, generates SQL, inspects results, and auto-corrects SQL errors.
+1. **Two-Step Intent Router & Autonomous ReAct Loop**:
+   - Classifies incoming queries via `gemini-3.1-flash-lite` into `out_of_scope` (`0` steps), `capabilities` (`1` catalog step on `gemini-3.1-flash-lite`), `simple_query` (`3` steps on `gemini-3.5-flash-lite`), or `complex_query` (`6` steps on `gemini-3.8-flash`).
+   - Binds first-class LangChain tools (`search_data_catalog`, `run_sql_query`) directly to the routed Gemini model.
    - Minimalist zero-shot system prompt without hardcoded schemas or tools; uses native API tool-binding schema definitions.
    - Provides explicit error feedback (`400 Bad Request`) when `GEMINI_API_KEY` is missing, eliminating brittle heuristics.
 2. **Multi-Turn Conversational Session Memory**:
@@ -61,9 +61,9 @@ flowchart TD
 3. **Resilient Pure-Python DuckDB Lakehouse Execution**:
    - In-process execution directly against local Parquet files, executing queries in **<10 ms**.
    - Native row serialization without pandas dependency, ensuring maximum speed and zero environment conflicts.
-4. **LookML as Single Source of Truth & AST Indexing**:
-   - Uses native `lkml` parser to extract measures, dimensions, views, explores, and relational joins from `projects/wallet-lookml`.
-   - Ingests semantic definitions into ChromaDB, grounding LLM reasoning and eliminating hallucinations or metric drift.
+4. **LookML as Single Source of Truth & Cosine Similarity Filtering**:
+   - Wipes ChromaDB clean (`vector_store.clear()`) on every re-index and uses the native `lkml` parser to extract measures (with `filters__all` and aggregation wrappers), dimensions, `dimension_groups`, `CASE` statements, explores, and joins from `projects/wallet-lookml`.
+   - Computes cosine similarity (`1 - distance`) and filters out low-relevance noise below `RAG_MIN_SIMILARITY = 0.28`.
 5. **Safe AST-Guarded SQL Execution**:
    - Strict read-only enforcement allowing only `SELECT` and `WITH` statements.
    - Regex-based AST safety blocking mutation keywords (`DROP`, `DELETE`, `INSERT`, `ALTER`, `ATTACH`).
@@ -89,7 +89,8 @@ ai-data-agent/
 │   │   └── indexer.py              # LookML & Lakehouse metadata extractor
 │   ├── agent/
 │   │   ├── prompts.py              # Minimalist system prompt (no static schemas)
-│   │   ├── runner.py               # Agent orchestrator with ReAct loop & session memory
+│   │   ├── router.py               # Two-step IntentRouter (gemini-3.1-flash-lite)
+│   │   ├── runner.py               # Agent orchestrator with routed ReAct loop & session memory
 │   │   └── tools/
 │   │       ├── duckdb_tool.py      # Read-only DuckDB SQL engine over Parquets
 │   │       └── rag_tool.py         # Semantic catalog search tool
@@ -150,7 +151,11 @@ cp .env.example .env
 Set your Google AI Studio API key in `.env`:
 ```ini
 GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_ROUTER_MODEL=gemini-3.1-flash-lite
+GEMINI_SIMPLE_MODEL=gemini-3.5-flash-lite
 GEMINI_MODEL=gemini-3.8-flash
+RAG_TOP_K=5
+RAG_MIN_SIMILARITY=0.28
 WALLET_DATA_DIR=C:/projects/wallet/data
 LOOKML_DIR=C:/projects/wallet-lookml
 ```
