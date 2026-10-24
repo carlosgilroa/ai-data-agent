@@ -79,14 +79,17 @@ The indexer uses the Python `lkml` parser to extract complete semantic metadata 
 
 ---
 
-## 3. Cosine Similarity Scoring & Relevancy Cutoff (`app/rag/store.py`)
+## 3. Cosine Similarity Scoring, Noise Floor & Dynamic 80% Relative Cutoff (`app/rag/store.py`)
 
-To prevent low-relevance items from polluting the LLM context and triggering exploratory "rabbit hole" tool loops:
+To prevent low-relevance items from polluting the LLM context while ensuring single-word entity lookups (e.g. `"groceries"`, `"rent"`, `"salary"`) are never dropped:
 
 - **Cosine Distance Collection**: ChromaDB is initialized with `metadata={"hnsw:space": "cosine"}`.
 - **Similarity Formula**:
   $$\text{similarity\_score} = \max(0.0, \text{round}(1.0 - \text{distance}, 4))$$
-- **Similarity Threshold (`RAG_MIN_SIMILARITY = 0.28`)**:
-  - Every `CatalogItem` returned by `vector_store.search()` includes both `distance` and `similarity_score`.
-  - Any candidate result with `similarity_score < 0.28` is discarded before reaching the LLM.
-  - Both the `search_data_catalog` tool output and `GET /api/v1/catalog/search` expose the exact similarity and distance scores for full transparency.
+- **Absolute Noise Floor (`RAG_MIN_SIMILARITY = 0.20`)**:
+  - Drops true out-of-domain noise (e.g. *"weather forecast in bogota"* which scores `< 0.19`).
+- **Dynamic 80% Relative Cutoff (`RAG_RELATIVE_CUTOFF_RATIO = 0.80`)**:
+  - Rather than applying a single rigid threshold, the indexer evaluates the top match's score (`top_score`) and sets:
+    $$\text{cutoff} = \max(\text{noise\_floor}, \text{round}(\text{top\_score} \times 0.80, 4))$$
+  - All candidate items with $\text{similarity\_score} \ge \text{cutoff}$ are retained up to `top_k`.
+  - This allows domain entity queries scoring `0.22`–`0.27` to succeed on the first catalog search without hardcoding entity lists.

@@ -58,15 +58,23 @@ def test_indexer_execution():
 
 
 def test_vector_store_search_and_similarity_cutoff():
-    """Verify cosine similarity scores are attached and noise below min_similarity is filtered out."""
-    matches = vector_store.search("total_spend_usd", top_k=5, min_similarity=0.28)
+    """Verify dynamic 80% relative cutoff and noise floor behavior."""
+    matches = vector_store.search("total_spend_usd", top_k=5)
     assert len(matches) > 0
+    top_score = matches[0].similarity_score
+    rel_cutoff = top_score * 0.80
     for item in matches:
         assert item.similarity_score is not None
         assert item.distance is not None
-        assert item.similarity_score >= 0.28
+        assert item.similarity_score >= rel_cutoff
         assert abs((1.0 - item.distance) - item.similarity_score) < 1e-3
 
-    # Unrelated query should be filtered out by the 0.28 cosine similarity threshold
-    noise_matches = vector_store.search("weather forecast in bogota tomorrow", top_k=5, min_similarity=0.28)
+    # Domain entity search ('groceries') succeeds under dynamic cutoff
+    grocery_matches = vector_store.search("groceries", top_k=5)
+    assert len(grocery_matches) > 0
+    matched_ids = {m.id for m in grocery_matches}
+    assert "mart_expense_summary.category_name" in matched_ids or "mart_expense_summary.labels" in matched_ids
+
+    # Unrelated query should be filtered out by the 0.20 noise floor threshold
+    noise_matches = vector_store.search("weather forecast in bogota tomorrow", top_k=5)
     assert len(noise_matches) == 0

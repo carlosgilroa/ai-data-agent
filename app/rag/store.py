@@ -120,9 +120,10 @@ class VectorStoreManager:
         top_k: Optional[int] = None,
         min_similarity: Optional[float] = None,
     ) -> List[CatalogItem]:
-        """Search catalog for matching metrics or dimensions using cosine similarity filtering."""
+        """Search catalog for matching metrics or dimensions using dynamic relative similarity filtering."""
         effective_top_k = top_k if top_k is not None else settings.RAG_TOP_K
-        threshold = settings.RAG_MIN_SIMILARITY if min_similarity is None else min_similarity
+        noise_floor = settings.RAG_MIN_SIMILARITY if min_similarity is None else min_similarity
+        rel_ratio = settings.RAG_RELATIVE_CUTOFF_RATIO
 
         if self.chroma_available and self.collection is not None:
             try:
@@ -130,16 +131,18 @@ class VectorStoreManager:
                 if total_count == 0:
                     return []
 
+                # Query candidate pool
+                cand_limit = min(max(effective_top_k * 2, 10), total_count)
                 results = self.collection.query(
                     query_texts=[query],
-                    n_results=min(effective_top_k, total_count),
+                    n_results=cand_limit,
                     include=["metadatas", "distances"],
                 )
-                matching_items: List[CatalogItem] = []
                 metadatas_list = (results or {}).get("metadatas") or [[]]
                 distances_list = (results or {}).get("distances") or [[]]
                 ids_list = (results or {}).get("ids") or [[]]
 
+                candidates: List[CatalogItem] = []
                 if metadatas_list and metadatas_list[0]:
                     for idx, meta in enumerate(metadatas_list[0]):
                         doc_id = ids_list[0][idx]
@@ -147,14 +150,7 @@ class VectorStoreManager:
                         dist_val = round(raw_dist, 4)
                         sim_val = round(max(0.0, 1.0 - raw_dist), 4)
 
-                        if sim_val < threshold:
-                            logger.debug(
-                                "Filtered out catalog item '%s' for query '%s' (similarity %.4f < %.4f)",
-                                doc_id, query, sim_val, threshold
-                            )
-                            continue
-
-                        matching_items.append(
+                        candidates.append(
                             CatalogItem(
                                 id=doc_id,
                                 item_type=meta.get("item_type", "metric"),
@@ -168,7 +164,26 @@ class VectorStoreManager:
                                 similarity_score=sim_val,
                             )
                         )
-                return matching_items
+
+                if not candidates:
+                    return []
+
+                # Determine top score and evaluate against noise floor
+                top_score = candidates[0].similarity_score or 0.0
+                if top_score < noise_floor:
+                    logger.debug(
+                        "Query '%s' rejected: top similarity score %.4f is below noise floor %.4f",
+                        query, top_score, noise_floor
+                    )
+                    return []
+
+                # Dynamic relative cutoff: retain candidates within rel_ratio (80%) of top score
+                dynamic_cutoff = max(noise_floor, round(top_score * rel_ratio, 4))
+                matching_items = [
+                    item for item in candidates
+                    if item.similarity_score is not None and item.similarity_score >= dynamic_cutoff
+                ]
+                return matching_items[:effective_top_k]
             except Exception as e:
                 logger.error("ChromaDB search failed: %s. Falling back to memory search.", e)
 
@@ -183,12 +198,18 @@ class VectorStoreManager:
             if hits > 0:
                 sim = round(min(1.0, hits / len(tokens)), 4)
                 dist = round(1.0 - sim, 4)
-                if sim >= threshold:
+                if sim >= noise_floor:
                     item_copy = item.model_copy(update={"similarity_score": sim, "distance": dist})
                     scored.append((sim, item_copy))
 
+        if not scored:
+            return []
+
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [item for _, item in scored[:effective_top_k]]
+        top_sim = scored[0][0]
+        dynamic_cutoff = max(noise_floor, round(top_sim * rel_ratio, 4))
+        filtered = [item for sim, item in scored if sim >= dynamic_cutoff]
+        return filtered[:effective_top_k]
 
     def get_by_id(self, doc_id: str) -> Optional[CatalogItem]:
         """Retrieve a specific catalog item by its ID (e.g. 'table.dim_accounts')."""

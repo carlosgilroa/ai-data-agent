@@ -366,6 +366,14 @@ class AgentRunner:
         except Exception:
             final_answer = f"Agent reached reasoning iteration limit ({max_iterations}). Last SQL executed: {last_sql_executed}"
 
+        if not final_answer or not final_answer.strip():
+            if last_sql_executed and last_sql_data:
+                final_answer = f"Executed query `{last_sql_executed}` and retrieved {len(last_sql_data)} rows."
+            elif last_sql_executed:
+                final_answer = f"Agent reached reasoning iteration limit ({max_iterations}). Last SQL executed: `{last_sql_executed}`."
+            else:
+                final_answer = f"Agent reached reasoning iteration limit ({max_iterations}) during catalog exploration. Please retry or formulate a direct inquiry."
+
         # Update session history with sliding window
         if session_id:
             messages.append(AIMessage(content=final_answer))

@@ -22,9 +22,10 @@ class Settings(BaseSettings):
     GEMINI_SIMPLE_MODEL: str = "gemini-3.5-flash-lite"
     GEMINI_MODEL: str = "gemini-3.8-flash"
 
-    # Semantic RAG Thresholds
+    # Semantic RAG Thresholds (0.20 noise floor + 80% relative cutoff to top match)
     RAG_TOP_K: int = 5
-    RAG_MIN_SIMILARITY: float = 0.28
+    RAG_MIN_SIMILARITY: float = 0.20
+    RAG_RELATIVE_CUTOFF_RATIO: float = 0.80
 
     # Data paths (pointing to local lakehouse and semantic layer)
     WALLET_DATA_DIR: Path = Path("C:/projects/wallet/data")
