@@ -175,6 +175,37 @@ class AgentRunner:
             return "".join(parts).strip()
         return str(content).strip()
 
+    def _save_session_turn(
+        self,
+        session_id: Optional[str],
+        user_query: str,
+        assistant_answer: str,
+        last_sql: Optional[str] = None,
+    ) -> None:
+        """Persist clean conversational dialogue turns (HumanMessage, AIMessage) to session memory.
+
+        Includes the executed SQL query in the assistant turn for semantic continuity,
+        without preserving raw intermediate ToolMessages that cause Gemini turn-validation
+        errors (400 INVALID_ARGUMENT).
+        """
+        if not session_id:
+            return
+
+        assistant_content = assistant_answer
+        if last_sql and "```sql" not in assistant_content:
+            assistant_content += f"\n\n```sql\n-- Executed Lakehouse Query\n{last_sql}\n```"
+
+        history = self.sessions.get(session_id, [])
+        history.append(HumanMessage(content=user_query))
+        history.append(AIMessage(content=assistant_content))
+
+        # Sliding window: keep the last 10 conversation turns (20 messages)
+        max_dialogue_messages = 20
+        if len(history) > max_dialogue_messages:
+            history = history[-max_dialogue_messages:]
+
+        self.sessions[session_id] = history
+
     def run_query(self, request: QueryRequest) -> QueryResponse:
         """Execute two-step routed ReAct loop:
         1. Check API key presence.
@@ -262,15 +293,13 @@ class AgentRunner:
                 f"Always invoke search_data_catalog first with the recommended metric search phrase to discover the relevant table and metrics before calling get_dimension_values. Only query dimension values on tables confirmed to exist in the catalog."
             )
 
-        # Multi-turn session memory retrieval
+        # Multi-turn session memory retrieval:
+        # Reconstruct clean dialogue sequence starting with fresh SystemMessage (with runtime context & router guidance),
+        # followed by prior conversational turns (HumanMessage, AIMessage), followed by current user HumanMessage.
+        messages: List[Any] = [SystemMessage(content=AGENT_SYSTEM_PROMPT + context_envelope)]
         if session_id and session_id in self.sessions:
-            messages: List[Any] = self.sessions[session_id]
-            messages.append(HumanMessage(content=request.query))
-        else:
-            messages = [
-                SystemMessage(content=AGENT_SYSTEM_PROMPT + context_envelope),
-                HumanMessage(content=request.query)
-            ]
+            messages.extend(self.sessions[session_id])
+        messages.append(HumanMessage(content=request.query))
 
         # -----------------------------------------------------------------
         # Step 2A: Out-of-Scope Handling (0 tool steps, separate LLM call)
@@ -290,11 +319,7 @@ class AgentRunner:
             ai_msg = base_llm.invoke(oos_messages)
             answer = self._extract_text(ai_msg.content)
 
-            if session_id:
-                messages.append(AIMessage(content=answer))
-                if len(messages) > 15:
-                    messages = [messages[0]] + messages[-14:]
-                self.sessions[session_id] = messages
+            self._save_session_turn(session_id, request.query, answer, last_sql=None)
 
             duration_ms = round((time.time() - start_time) * 1000, 2)
             return QueryResponse(
@@ -319,11 +344,7 @@ class AgentRunner:
             if not ai_msg.tool_calls:
                 answer = self._extract_text(ai_msg.content)
 
-                # Update session history with sliding window
-                if session_id:
-                    if len(messages) > 15:
-                        messages = [messages[0]] + messages[-14:]
-                    self.sessions[session_id] = messages
+                self._save_session_turn(session_id, request.query, answer, last_sql=last_sql_executed)
 
                 duration_ms = round((time.time() - start_time) * 1000, 2)
                 return QueryResponse(
@@ -463,12 +484,7 @@ class AgentRunner:
             else:
                 final_answer = f"Agent reached reasoning iteration limit ({max_iterations}) during catalog exploration. Please retry or formulate a direct inquiry."
 
-        # Update session history with sliding window
-        if session_id:
-            messages.append(AIMessage(content=final_answer))
-            if len(messages) > 15:
-                messages = [messages[0]] + messages[-14:]
-            self.sessions[session_id] = messages
+        self._save_session_turn(session_id, request.query, final_answer, last_sql=last_sql_executed)
 
         duration_ms = round((time.time() - start_time) * 1000, 2)
         return QueryResponse(

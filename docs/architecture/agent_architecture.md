@@ -107,15 +107,14 @@ The core orchestration resides in [`AgentRunner.run_query()`](file:///c:/project
 
 ---
 
-## 5. Multi-Turn Session Memory
+## 5. Multi-Turn Session Memory & Protocol Safety
 
-Conversational memory enables natural back-and-forth financial exploration:
+Conversational memory enables natural back-and-forth financial exploration while maintaining strict Gemini API protocol compliance:
 
 - **Keyed by Session ID**: Requests provide an optional `session_id` in `QueryRequest`.
-- **In-Memory Store**: Stored in `agent_runner.sessions: Dict[str, List[BaseMessage]]`.
-- **15-Message Sliding Window**: Retains the initial `SystemMessage` plus the latest 14 messages:
-  ```python
-  if len(messages) > 15:
-      messages = [messages[0]] + messages[-14:]
-  ```
+- **Clean Dialogue Turn Persistence (`_save_session_turn`)**:
+  - Across turns, session memory preserves clean conversational pairs (`HumanMessage` and `AIMessage`), appending the executed Lakehouse SQL query to the assistant message for semantic continuity.
+  - Raw intermediate ReAct scratchpad messages (`ToolMessage` and intermediate function calls) are discarded upon turn completion. This guarantees that Gemini's API never encounters orphaned tool messages or turn-sequencing errors (`400 INVALID_ARGUMENT: function call turn must come immediately after a user turn or function response`).
+- **Dynamic Context Envelope Refresh**: Every new turn begins with a fresh `SystemMessage` containing the latest Lakehouse temporal bounds and router semantic decomposition guidance.
+- **Turn-Boundary Sliding Window**: Retains up to 10 clean conversation turns (20 dialogue messages), completely eliminating naive slicing across tool calls.
 - **Reset Endpoint**: `DELETE /api/v1/agent/session/{session_id}` clears state on demand.

@@ -204,3 +204,39 @@ def test_intent_router_semantic_decomposition_schema():
     assert decision.intent == "simple_query"
     assert decision.metric_search_phrase == "total food spending expenses"
     assert decision.entity_keywords == ["food"]
+
+
+def test_session_memory_turn_validation_safety():
+    """Verify session memory saves clean (HumanMessage, AIMessage) dialogue pairs,
+    preventing orphaned ToolMessages from violating Gemini turn-validation rules.
+    """
+    from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+
+    test_session = "test-session-safety-check"
+    agent_runner.clear_session(test_session)
+
+    # Simulate saving 2 turns
+    agent_runner._save_session_turn(
+        session_id=test_session,
+        user_query="How much did I spend on utilities last month?",
+        assistant_answer="You spent $603,334.16 on Energy & utilities.",
+        last_sql="SELECT year_month, net_spent FROM mart_expense_summary",
+    )
+    agent_runner._save_session_turn(
+        session_id=test_session,
+        user_query="How much did I spend on groceries last month?",
+        assistant_answer="You spent $1,549,008.66 on Groceries.",
+        last_sql="SELECT year_month, net_spent FROM mart_expense_summary",
+    )
+
+    history = agent_runner.sessions[test_session]
+    assert len(history) == 4
+    # Ensure all messages are alternating HumanMessage and AIMessage, and no ToolMessage exists
+    assert isinstance(history[0], HumanMessage)
+    assert isinstance(history[1], AIMessage)
+    assert isinstance(history[2], HumanMessage)
+    assert isinstance(history[3], AIMessage)
+    assert not any(isinstance(m, ToolMessage) for m in history)
+    # Ensure SQL is retained in the assistant turn for contextual continuity
+    assert "Executed Lakehouse Query" in history[1].content
+    assert "mart_expense_summary" in history[1].content
