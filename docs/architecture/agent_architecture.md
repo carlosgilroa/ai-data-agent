@@ -118,3 +118,5 @@ Conversational memory enables natural back-and-forth financial exploration while
 - **Dynamic Context Envelope Refresh**: Every new turn begins with a fresh `SystemMessage` containing the latest Lakehouse temporal bounds and router semantic decomposition guidance.
 - **Turn-Boundary Sliding Window**: Retains up to 10 clean conversation turns (20 dialogue messages), completely eliminating naive slicing across tool calls.
 - **Reset Endpoint**: `DELETE /api/v1/agent/session/{session_id}` clears state on demand.
+- **Session Inspection Endpoint**: `GET /api/v1/agent/session/{session_id}` returns active dialogue history, turn counts, and raw messages for live inspection.
+- **Server Observability & Structured Logging**: The agent endpoint logs incoming queries, model routing, executed Lakehouse SQL queries, latency, and synthesized answers in real time (`>>> USER QUERY`, `<<< AGENT ANSWER`) for live monitoring and diagnostics.

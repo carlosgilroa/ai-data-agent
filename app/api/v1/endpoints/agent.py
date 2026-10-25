@@ -1,8 +1,11 @@
 import time
+import logging
 from fastapi import APIRouter, HTTPException
 from app.schemas.query import QueryRequest, QueryResponse, DirectSQLRequest, DirectSQLResponse
 from app.agent.runner import agent_runner
 from app.agent.tools.duckdb_tool import duckdb_tool
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -14,13 +17,44 @@ def query_agent(request: QueryRequest) -> QueryResponse:
     The agent retrieves LookML semantics, formulates LookML-aligned SQL, executes against DuckDB,
     and returns an analytical answer with full traceability.
     """
+    session_label = request.session_id or "default"
+    logger.info(">>> [Session: %s] USER QUERY: %s", session_label, request.query)
     try:
         response = agent_runner.run_query(request)
+        logger.info(
+            "<<< [Session: %s] INTENT: %s | MODEL: %s | EXEC_TIME: %.2fms | SQL: %s",
+            session_label,
+            response.intent,
+            response.model_used,
+            response.execution_time_ms,
+            response.sql,
+        )
+        logger.info("<<< [Session: %s] AGENT ANSWER: %s", session_label, response.answer)
         return response
     except (RuntimeError, ValueError) as e:
+        logger.warning("Query error [Session: %s]: %s", session_label, e)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.error("Query unexpected error [Session: %s]: %s", session_label, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
+
+
+@router.get("/session/{session_id}", tags=["AI Data Agent"])
+def get_session(session_id: str):
+    """Retrieve active conversational dialogue turns for a specific session ID."""
+    history = agent_runner.sessions.get(session_id, [])
+    dialogue = []
+    for msg in history:
+        dialogue.append({
+            "type": msg.__class__.__name__,
+            "content": msg.content
+        })
+    return {
+        "session_id": session_id,
+        "turn_count": len(history) // 2,
+        "message_count": len(history),
+        "dialogue": dialogue
+    }
 
 
 @router.delete("/session/{session_id}", tags=["AI Data Agent"])

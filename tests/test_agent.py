@@ -248,3 +248,39 @@ def test_session_memory_turn_validation_safety():
     # Ensure SQL is retained in the assistant turn for contextual continuity
     assert "Executed Lakehouse Query" in history[1].content
     assert "mart_expense_summary" in history[1].content
+
+
+def test_get_session_endpoint():
+    """Verify GET /api/v1/agent/session/{session_id} retrieves active dialogue history."""
+    test_session = "test-session-endpoint-inspection"
+    agent_runner.clear_session(test_session)
+
+    # Empty session inspection
+    res = client.get(f"/api/v1/agent/session/{test_session}")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["session_id"] == test_session
+    assert data["turn_count"] == 0
+    assert data["message_count"] == 0
+    assert data["dialogue"] == []
+
+    # Populate a turn
+    agent_runner._save_session_turn(
+        session_id=test_session,
+        user_query="Hello test",
+        assistant_answer="Response test",
+    )
+
+    res = client.get(f"/api/v1/agent/session/{test_session}")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["session_id"] == test_session
+    assert data["turn_count"] == 1
+    assert data["message_count"] == 2
+    assert len(data["dialogue"]) == 2
+    assert data["dialogue"][0]["type"] == "HumanMessage"
+    assert data["dialogue"][0]["content"] == "Hello test"
+    assert data["dialogue"][1]["type"] == "AIMessage"
+    assert data["dialogue"][1]["content"] == "Response test"
+
+    agent_runner.clear_session(test_session)

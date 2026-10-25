@@ -58,9 +58,11 @@ flowchart TD
    - Dynamically injects a **Lakehouse Context Envelope** (recorded date bounds from DuckDB + semantic decomposition hints) into runtime system context for zero-shot temporal anchoring without hardcoded dates.
    - Minimalist zero-shot system prompt without hardcoded schemas or tools; uses native API tool-binding schema definitions and strict financial grounding against hallucinations.
    - Provides explicit error feedback (`400 Bad Request`) when `GEMINI_API_KEY` is missing, eliminating brittle heuristics.
-2. **Multi-Turn Conversational Session Memory**:
-   - Preserves dialogue history keyed by `session_id` using a 15-message sliding context window.
+2. **Multi-Turn Conversational Session Memory & Observability**:
+   - Preserves dialogue history keyed by `session_id` using a 10-turn (20-message) sliding context window.
+   - Session inspection endpoint (`GET /api/v1/agent/session/{session_id}`) for live dialogue review.
    - Session reset endpoint (`DELETE /api/v1/agent/session/{session_id}`) for clearing conversation state.
+   - Real-time structured request/response logging for query and answer observability.
 3. **Resilient Pure-Python DuckDB Lakehouse Execution**:
    - In-process execution directly against local Parquet files, executing queries in **<10 ms**.
    - Native row serialization without pandas dependency, ensuring maximum speed and zero environment conflicts.
@@ -104,7 +106,7 @@ ai-data-agent/
 │           └── endpoints/
 │               ├── health.py       # Lakehouse and vector store health check
 │               ├── catalog.py      # Semantic catalog endpoints
-│               └── agent.py        # Natural language query, session reset & direct SQL
+│               └── agent.py        # Natural language query, session inspect/reset & direct SQL
 ├── docs/                           # Dedicated architecture & API documentation
 │   ├── README.md                   # Documentation hub & sitemap
 │   ├── api/
