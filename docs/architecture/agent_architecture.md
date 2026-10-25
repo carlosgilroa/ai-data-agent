@@ -53,7 +53,7 @@ To optimize latency and token cost while preventing unnecessary exploratory tool
 `gemini-3.1-flash-lite` inspects the user prompt and outputs a structured `RouterDecision` with zero tools bound:
 - **`intent` & `reasoning`**: Classifies the query into one of the 4 intent categories and explains the decision.
 - **`metric_search_phrase`**: Decomposes the user inquiry into a natural semantic query phrase combining the metric/aggregation intent with domain context (e.g. `'total food spending expenses last month'`), optimized for dense vector cosine similarity search in `search_data_catalog`.
-- **`entity_keywords`**: Extracts specific domain entities, category names, or account names (e.g. `['food']`), prepared for discrete categorical validation via `get_dimension_values`.
+- **`entity_keywords`**: Extracts specific domain entities, category names, or account names (e.g. `['food', 'transportation']`), prepared for discrete categorical validation via `get_dimension_values`.
 
 ### Step 2: Routed Model & Discrete Tool Allocation
 Based on the classified `intent`, `AgentRunner` selects the target Gemini model, allowed tools, and `max_iterations` ceiling:

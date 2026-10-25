@@ -15,7 +15,7 @@ class RouterDecision(BaseModel):
     )
     entity_keywords: List[str] = Field(
         default_factory=list,
-        description="Extracted domain entities, topics, category names, or account names (e.g. ['food'], ['transportation', 'uber'], ['bancolombia'])",
+        description="Extracted domain entities, topics, category names, or account names (e.g. ['food'], ['transportation', 'uber'])",
     )
 
 

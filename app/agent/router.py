@@ -19,7 +19,7 @@ Your responsibility is twofold:
 
 2. Semantic Query Decomposition (for analytical queries):
    - "metric_search_phrase": Construct a natural analytical search phrase combining the metric/calculation intent with domain context suitable for dense vector catalog search (e.g. "total food spending expenses", "monthly savings rate", "net cashflow after refunds", "transportation expenses").
-   - "entity_keywords": Extract domain entities, category keywords, merchants, accounts, or currencies (e.g. ["food"], ["transportation"], ["bancolombia"]).
+   - "entity_keywords": Extract domain entities, category keywords, merchants, accounts, or currencies (e.g. ["food"], ["transportation"]).
 """
 
 
