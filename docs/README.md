@@ -14,9 +14,8 @@ docs/
 ├── architecture/                      # System design, RAG pipeline & safety guards
 │   ├── agent_architecture.md          # Autonomous ReAct loop, session memory & SQL safety
 │   └── semantic_rag_indexer.md        # LookML AST parser, views/models/joins & ChromaDB RAG
-├── evaluation/                        # Golden benchmarks & reconciliation (Upcoming)
-│   ├── golden_suite.md                # [Under Review] Benchmark questions & ground-truth validation
-│   └── metrics_and_drift.md           # [Planned] LookML semantic drift detection
+├── evaluation/                        # BI ground-truth verification & semantic alignment
+│   └── looker_dashboard_reconciliation.md # [Active] Real-world reconciliation against production Looker Dashboard
 └── deployment/                        # Local and production deployment guides (Upcoming)
     ├── local_development.md           # [Planned] Local venv, Windows execution, environment
     └── docker_compose.md              # [Planned] Containerization & Raspberry Pi integration
