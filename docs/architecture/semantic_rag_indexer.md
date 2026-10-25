@@ -68,7 +68,7 @@ The indexer uses the Python `lkml` parser to extract complete semantic metadata 
 5. **Direct `sql_table_name` Binding & Persistent Derived Tables (PDTs)**:
    - Strips LookML project macro prefixes (e.g. `` `@{schema_name}.dim_accounts` `` $\rightarrow$ `dim_accounts`) via `_strip_lookml_table_macro()`, mapping every LookML view 1:1 to its physical Parquet table (`master_records`, `dim_accounts`, `dim_categories`, `dim_labels`, `fx_rates`, `mart_monthly_pnl`, `mart_expense_summary`) without hardcoded view-resolution dicts.
    - Extracts LookML `derived_table` definitions (`pdt_category_mom_velocity`) as `view` catalog items and compiles them directly as DuckDB SQL views.
-   - When `search_data_catalog` returns matched dimensions or metrics, it automatically appends the physical column schema (`[Table Schema: <table_name>]`) for each referenced table so the LLM never guesses column names.
+   - When `search_data_catalog` returns matched dimensions or metrics, it automatically attaches the complete physical column schema (`[Table Schema: <table_name>]`) strictly for the **single top-scoring referenced table** (including grain, primary key, row count, date coverage, and column types) rather than dumping multiple competing schemas, preventing context pollution and model confusion. If no catalog items match, a clean, generalized message is returned without leaking static table names.
 
 6. **Dynamic Table Statistics & Truncation Observability**:
    - At indexing time, DuckDB dynamically inspects each Parquet table to capture total row count (`COUNT(*)`) and temporal bounds (`MIN/MAX` over `date` or `year_month`), combining them with the LookML view's declared grain and primary key:

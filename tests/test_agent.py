@@ -112,3 +112,35 @@ def test_intent_router_route_config():
     assert tools_cmp == ["search_data_catalog", "run_sql_query"]
 
 
+def test_rag_tool_single_top_table_schema_attachment():
+    """Verify search_data_catalog only attaches the schema for the single top-1 referenced table,
+
+    preventing context overload from dumping multiple competing table schemas.
+    """
+    res = search_data_catalog.invoke({"query": "monthly expense pnl summary"})
+    assert isinstance(res, str)
+    # Count occurrences of schema footers
+    schema_count = res.count("[Table Schema:")
+    assert schema_count <= 1, f"Expected at most 1 table schema attached, found {schema_count}"
+
+
+def test_rag_tool_no_match_clean_message():
+    """Verify search_data_catalog provides a clean response without hardcoded table names when no items match."""
+    from app.agent.tools.rag_tool import search_data_catalog as raw_search
+    res = raw_search("completely_unrelated_query_xyz_987", min_similarity=0.99)
+    assert "No catalog items matched" in res
+    assert "master_records" not in res
+    assert "mart_expense_summary" not in res
+    assert "pdt_category_mom_velocity" not in res
+
+
+def test_run_sql_query_docstring_is_generalized():
+    """Verify run_sql_query tool docstring does not leak hardcoded table names into LLM tool bindings."""
+    doc = run_sql_query.__doc__ or ""
+    assert "master_records" not in doc
+    assert "mart_expense_summary" not in doc
+    assert "mart_monthly_pnl" not in doc
+    assert "dim_accounts" not in doc
+
+
+

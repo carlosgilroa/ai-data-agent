@@ -34,10 +34,8 @@ def search_data_catalog(query: str) -> str:
 
 @tool
 def run_sql_query(sql: str) -> str:
-    """Execute a safe read-only SQL query against local DuckDB lakehouse tables and LookML PDTs
-    (master_records, dim_accounts, dim_categories, dim_labels, fx_rates, mart_monthly_pnl,
-    mart_expense_summary, pdt_category_mom_velocity).
-    Returns columns, row count, and sample data rows.
+    """Execute a read-only SQL query against the analytical lakehouse database.
+    Returns column names, row count, execution time, and result rows.
     """
     try:
         res = duckdb_tool.run_query(sql)
@@ -246,10 +244,31 @@ class AgentRunner:
             )
 
         # -----------------------------------------------------------------
-        # Step 2B: Tool-Calling ReAct Loop (capabilities=1, simple=3, complex=6)
+        # Step 2B: Tool-Calling ReAct Loop (capabilities=1, simple=4, complex=6)
         # -----------------------------------------------------------------
+        catalog_searched = False
+        tools_to_bind = [TOOL_REGISTRY[name] for name in allowed_tool_names if name in TOOL_REGISTRY]
+
         for _ in range(max_iterations):
-            ai_msg = routed_llm_with_tools.invoke(messages)
+            # Dynamic tool masking: once search_data_catalog has been invoked, restrict allowed function calls
+            if catalog_searched and "search_data_catalog" in allowed_tool_names:
+                active_tool_names = [t for t in allowed_tool_names if t != "search_data_catalog"]
+                if active_tool_names:
+                    active_llm = base_llm.bind_tools(
+                        tools_to_bind,
+                        tool_config={
+                            "function_calling_config": {
+                                "mode": "AUTO",
+                                "allowed_function_names": active_tool_names,
+                            }
+                        },
+                    )
+                else:
+                    active_llm = base_llm.bind_tools(tools_to_bind, tool_choice="none")
+            else:
+                active_llm = routed_llm_with_tools
+
+            ai_msg = active_llm.invoke(messages)
             messages.append(ai_msg)
 
             # If no tool calls were requested, the model has completed its final answer
@@ -283,7 +302,15 @@ class AgentRunner:
                 thought_text = f"Agent ({target_model}) decided to invoke tool '{tool_name}' with parameters: {tool_args}"
 
                 if tool_name == "search_data_catalog" and "search_data_catalog" in allowed_tool_names:
-                    tool_output = search_data_catalog.invoke(tool_args)
+                    if catalog_searched:
+                        tool_output = (
+                            "Catalog search has already been performed in a prior step. "
+                            "Do not search the catalog again; proceed directly to execute your SQL query using run_sql_query."
+                        )
+                    else:
+                        tool_output = search_data_catalog.invoke(tool_args)
+                        catalog_searched = True
+
                     thought_steps.append(
                         AgentThoughtStep(
                             step_number=step_counter,
@@ -349,7 +376,11 @@ class AgentRunner:
         try:
             messages.append(
                 HumanMessage(
-                    content="Please synthesize your final analytical answer now based on the context and results retrieved above. Do not call any more tools."
+                    content=(
+                        "Please synthesize your final analytical answer now based strictly on the query results retrieved above. "
+                        "Do not call any more tools. If no metric calculation query was executed, state your preliminary findings "
+                        "and identified tables, but state clearly that the final answer was not achieved. Never fabricate numbers."
+                    )
                 )
             )
             tools_to_bind = [TOOL_REGISTRY[name] for name in allowed_tool_names if name in TOOL_REGISTRY]

@@ -89,11 +89,14 @@ The core orchestration resides in [`AgentRunner.run_query()`](file:///c:/project
 1. **Router Classification (`Step 1`)**: Records an `intent_router` thought step detailing the chosen intent, target model, and step budget.
 2. **Out-of-Scope Short Path**: If `intent == "out_of_scope"`, invokes `gemini-3.1-flash-lite` without tools to return a polite scope refusal.
 3. **ReAct Iteration Step (up to `max_iterations`)**:
-   - Passes message history to the routed `routed_llm_with_tools.invoke(messages)`.
-   - Executes `search_data_catalog` (cosine similarity filtered $\ge 0.28$) or `run_sql_query` (DuckDB execution).
+   - Passes message history to `active_llm.invoke(messages)`.
+   - **Dynamic Tool Masking**: Once `search_data_catalog` has been executed, `AgentRunner` dynamically masks it from the bound tools via Gemini's native API tool configuration (`tool_config={"function_calling_config": {"mode": "AUTO", "allowed_function_names": ["run_sql_query"]}}`) and an execution-time guard. This prevents the agent from entering redundant consecutive catalog search loops and guarantees that subsequent steps focus strictly on analytical SQL execution.
+   - Executes `search_data_catalog` (cosine similarity filtered with dynamic 80% relative cutoff) or `run_sql_query` (safe DuckDB execution with generalized docstring).
    - Captures output into an `AgentThoughtStep` for full observability.
    - **Self-Correction on Error**: If DuckDB returns an error, the raw error is returned to Gemini in the `ToolMessage` for automatic query refinement.
-4. **Synthesis**: When Gemini outputs a response without tool calls (or when `max_iterations` is reached, using `tool_choice="none"`), it synthesizes a grounded analytical answer.
+4. **Synthesis & Anti-Hallucination Directives**:
+   - When Gemini outputs a response without tool calls (or when `max_iterations` is reached, using `tool_choice="none"`), it synthesizes a grounded analytical answer.
+   - Strictly enforced **Absolute Financial Grounding**: the model is forbidden from inventing or extrapolating numbers. If iteration limits are reached without executing a metric aggregation query, the agent reports preliminary findings and identified tables while explicitly stating that the final numerical calculation was not achieved.
 
 ---
 
