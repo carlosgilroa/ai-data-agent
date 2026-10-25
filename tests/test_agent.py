@@ -103,7 +103,7 @@ def test_intent_router_route_config():
 
     m_sim, steps_sim, tools_sim = intent_router.get_route_config("simple_query")
     assert m_sim == settings.GEMINI_SIMPLE_MODEL
-    assert steps_sim == 3
+    assert steps_sim == 4
     assert tools_sim == ["search_data_catalog", "run_sql_query"]
 
     m_cmp, steps_cmp, tools_cmp = intent_router.get_route_config("complex_query")

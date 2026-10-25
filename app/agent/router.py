@@ -120,7 +120,7 @@ class IntentRouter:
         if intent == "capabilities":
             return (settings.GEMINI_ROUTER_MODEL, 1, ["search_data_catalog"])
         if intent == "simple_query":
-            return (settings.GEMINI_SIMPLE_MODEL, 3, ["search_data_catalog", "run_sql_query"])
+            return (settings.GEMINI_SIMPLE_MODEL, 4, ["search_data_catalog", "run_sql_query"])
         # complex_query
         return (settings.GEMINI_MODEL, 6, ["search_data_catalog", "run_sql_query"])
 

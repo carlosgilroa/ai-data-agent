@@ -147,7 +147,7 @@ Wipes the ChromaDB collection clean (`vector_store.clear()`) and forces a live r
 ### `POST /api/v1/agent/query`
 
 The primary interface for natural language analytics. Executes a **Two-Step Intent Router (`gemini-3.1-flash-lite`)** followed by an autonomous **ReAct tool-calling loop**:
-1. Classifies user intent into `out_of_scope` (`0` steps), `capabilities` (`1` step on `gemini-3.1-flash-lite`), `simple_query` (`3` steps on `gemini-3.5-flash-lite`), or `complex_query` (`6` steps on `gemini-3.8-flash`).
+1. Classifies user intent into `out_of_scope` (`0` steps), `capabilities` (`1` step on `gemini-3.1-flash-lite`), `simple_query` (`4` steps on `gemini-3.5-flash-lite`), or `complex_query` (`6` steps on `gemini-3.8-flash`).
 2. Dynamically invokes `search_data_catalog` (filtered by cosine similarity $\ge 0.28$) to discover LookML measures, business rules, and table schemas.
 3. Formulates LookML-aligned SQL and invokes `run_sql_query` against the local DuckDB lakehouse.
 4. Automatically self-corrects SQL if a syntax error or missing column is reported by DuckDB.

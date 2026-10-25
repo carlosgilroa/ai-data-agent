@@ -25,7 +25,7 @@ The AI Data Agent is an autonomous, multi-tier tool-calling reasoning engine bui
 |                                           |                                             |
 |        +----------------------+-----------+-----------+----------------------+          |
 |        | out_of_scope         | capabilities          | simple_query         | complex  |
-|        v (0 tool steps)       v (max 1 step)          v (max 3 steps)        v (max 6)  |
+|        v (0 tool steps)       v (max 1 step)          v (max 4 steps)        v (max 6)  |
 |  +----------------+   +-------------------+   +--------------------+   +--------------+ |
 |  | 3.1-flash-lite |   | 3.1-flash-lite    |   | 3.5-flash-lite     |   | 3.8-flash    | |
 |  | (No tools)     |   | (Catalog tool)    |   | (Catalog + DuckDB) |   | (Full ReAct) | |
@@ -63,7 +63,7 @@ Based on the classified `intent`, `AgentRunner` selects the target Gemini model,
 |:---|:---|:---|:---:|:---|
 | `out_of_scope` | `gemini-3.1-flash-lite` | *None* | `0` | Politely declines non-financial/unrelated trivia questions without touching ChromaDB or DuckDB. |
 | `capabilities` | `gemini-3.1-flash-lite` | `search_data_catalog` | `1` | Grounds "what can you do?" responses in live indexed LookML tables/metrics. |
-| `simple_query` | `gemini-3.5-flash-lite` | `search_data_catalog`, `run_sql_query` | `3` | Fast, cost-efficient execution for single-metric lookups, counts, and single-table aggregations. |
+| `simple_query` | `gemini-3.5-flash-lite` | `search_data_catalog`, `run_sql_query` | `4` | Fast, cost-efficient execution for single-metric lookups, counts, and single-table aggregations. |
 | `complex_query` | `gemini-3.8-flash` | `search_data_catalog`, `run_sql_query` | `6` | Deep multi-hop reasoning, period-over-period comparisons, Tier 1 vs Tier 2 reconciliations, and joins. |
 
 ---

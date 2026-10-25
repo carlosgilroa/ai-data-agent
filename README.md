@@ -52,7 +52,7 @@ flowchart TD
 ## Key Features
 
 1. **Two-Step Intent Router & Autonomous ReAct Loop**:
-   - Classifies incoming queries via `gemini-3.1-flash-lite` into `out_of_scope` (`0` steps), `capabilities` (`1` catalog step on `gemini-3.1-flash-lite`), `simple_query` (`3` steps on `gemini-3.5-flash-lite`), or `complex_query` (`6` steps on `gemini-3.8-flash`).
+   - Classifies incoming queries via `gemini-3.1-flash-lite` into `out_of_scope` (`0` steps), `capabilities` (`1` catalog step on `gemini-3.1-flash-lite`), `simple_query` (`4` steps on `gemini-3.5-flash-lite`), or `complex_query` (`6` steps on `gemini-3.8-flash`).
    - Binds first-class LangChain tools (`search_data_catalog`, `run_sql_query`) directly to the routed Gemini model.
    - Minimalist zero-shot system prompt without hardcoded schemas or tools; uses native API tool-binding schema definitions.
    - Provides explicit error feedback (`400 Bad Request`) when `GEMINI_API_KEY` is missing, eliminating brittle heuristics.
