@@ -90,7 +90,7 @@ The core orchestration resides in [`AgentRunner.run_query()`](file:///c:/project
 2. **Out-of-Scope Short Path**: If `intent == "out_of_scope"`, invokes `gemini-3.1-flash-lite` without tools to return a polite scope refusal.
 3. **ReAct Iteration Step (up to `max_iterations`)**:
    - Passes message history to `active_llm.invoke(messages)`.
-   - **Dynamic Tool Masking**: Once `search_data_catalog` has been executed, `AgentRunner` dynamically masks it from the bound tools via Gemini's native API tool configuration (`tool_config={"function_calling_config": {"mode": "AUTO", "allowed_function_names": ["run_sql_query"]}}`) and an execution-time guard. This prevents the agent from entering redundant consecutive catalog search loops and guarantees that subsequent steps focus strictly on analytical SQL execution.
+   - **Dynamic Tool Masking**: Once `search_data_catalog` has been executed, `AgentRunner` dynamically masks it from the bound tools by binding only the remaining analytical tools (`["run_sql_query"]`) via `_get_or_create_llm()` and enforcing an execution-time guard. This prevents the agent from entering redundant consecutive catalog search loops and guarantees that subsequent steps focus strictly on analytical SQL execution.
    - Executes `search_data_catalog` (cosine similarity filtered with dynamic 80% relative cutoff) or `run_sql_query` (safe DuckDB execution with generalized docstring).
    - Captures output into an `AgentThoughtStep` for full observability.
    - **Self-Correction on Error**: If DuckDB returns an error, the raw error is returned to Gemini in the `ToolMessage` for automatic query refinement.

@@ -247,24 +247,12 @@ class AgentRunner:
         # Step 2B: Tool-Calling ReAct Loop (capabilities=1, simple=4, complex=6)
         # -----------------------------------------------------------------
         catalog_searched = False
-        tools_to_bind = [TOOL_REGISTRY[name] for name in allowed_tool_names if name in TOOL_REGISTRY]
 
         for _ in range(max_iterations):
-            # Dynamic tool masking: once search_data_catalog has been invoked, restrict allowed function calls
+            # Dynamic tool masking: once search_data_catalog has been invoked, bind only remaining tools
             if catalog_searched and "search_data_catalog" in allowed_tool_names:
                 active_tool_names = [t for t in allowed_tool_names if t != "search_data_catalog"]
-                if active_tool_names:
-                    active_llm = base_llm.bind_tools(
-                        tools_to_bind,
-                        tool_config={
-                            "function_calling_config": {
-                                "mode": "AUTO",
-                                "allowed_function_names": active_tool_names,
-                            }
-                        },
-                    )
-                else:
-                    active_llm = base_llm.bind_tools(tools_to_bind, tool_choice="none")
+                _, active_llm = self._get_or_create_llm(target_model, active_tool_names)
             else:
                 active_llm = routed_llm_with_tools
 
