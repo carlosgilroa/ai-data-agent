@@ -12,7 +12,15 @@ from app.agent.runner import (
 from app.schemas.query import QueryRequest
 from app.core.config import settings
 
+from app.rag.indexer import indexer
+
 client = TestClient(app)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def setup_catalog():
+    """Ensure semantic catalog is indexed with table grains and stats before running agent tests."""
+    indexer.run_indexing()
 
 
 def test_agent_tools_execution():
