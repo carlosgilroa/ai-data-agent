@@ -9,6 +9,14 @@ class RouterDecision(BaseModel):
     """Structured output returned by the Intent Router."""
     intent: IntentType = Field(..., description="Classified query intent category")
     reasoning: str = Field(..., description="Concise explanation for the chosen intent")
+    metric_search_phrase: Optional[str] = Field(
+        default=None,
+        description="A natural semantic phrase combining the metric/calculation intent with domain context (e.g. 'total food spending expenses', 'monthly savings rate', 'net cashflow after refunds') suitable for dense vector catalog search.",
+    )
+    entity_keywords: List[str] = Field(
+        default_factory=list,
+        description="Extracted domain entities, topics, category names, or account names (e.g. ['food'], ['transportation', 'uber'], ['bancolombia'])",
+    )
 
 
 class AgentThoughtStep(BaseModel):
@@ -61,3 +69,4 @@ class HealthResponse(BaseModel):
     tables_available: List[str]
     vector_store_ready: bool
     gemini_configured: bool
+

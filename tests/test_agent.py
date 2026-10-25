@@ -190,3 +190,17 @@ def test_run_sql_query_docstring_is_generalized():
     assert "mart_expense_summary" not in doc
     assert "mart_monthly_pnl" not in doc
     assert "dim_accounts" not in doc
+
+
+def test_intent_router_semantic_decomposition_schema():
+    """Verify RouterDecision schema includes metric_search_phrase and entity_keywords."""
+    from app.schemas.query import RouterDecision
+    decision = RouterDecision(
+        intent="simple_query",
+        reasoning="User wants aggregated spend for food last month",
+        metric_search_phrase="total food spending expenses",
+        entity_keywords=["food"],
+    )
+    assert decision.intent == "simple_query"
+    assert decision.metric_search_phrase == "total food spending expenses"
+    assert decision.entity_keywords == ["food"]

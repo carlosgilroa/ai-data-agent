@@ -53,8 +53,9 @@ flowchart TD
 
 1. **Two-Step Intent Router & Autonomous ReAct Loop**:
    - Classifies incoming queries via `gemini-3.1-flash-lite` into `out_of_scope` (`0` steps), `capabilities` (`2` steps on `gemini-3.1-flash-lite`), `simple_query` (`6` steps on `gemini-3.5-flash-lite`), or `complex_query` (`8` steps on `gemini-3.8-flash`).
+   - Performs **Zero-Cost Semantic Query Decomposition**: extracts an enriched `metric_search_phrase` (dense vector search phrase) and `entity_keywords` (dimension filters) alongside the routing classification with zero extra API latency.
    - Binds discrete modular semantic tools (`search_data_catalog`, `get_table_schema`, `get_dimension_values`, `run_sql_query`) directly to the routed Gemini model with unrestricted multi-step introspection.
-   - Dynamically injects a **Lakehouse Context Envelope** (recorded date bounds from DuckDB) into runtime system context for zero-shot temporal anchoring without hardcoded dates.
+   - Dynamically injects a **Lakehouse Context Envelope** (recorded date bounds from DuckDB + semantic decomposition hints) into runtime system context for zero-shot temporal anchoring without hardcoded dates.
    - Minimalist zero-shot system prompt without hardcoded schemas or tools; uses native API tool-binding schema definitions and strict financial grounding against hallucinations.
    - Provides explicit error feedback (`400 Bad Request`) when `GEMINI_API_KEY` is missing, eliminating brittle heuristics.
 2. **Multi-Turn Conversational Session Memory**:

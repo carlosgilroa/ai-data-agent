@@ -49,8 +49,11 @@ flowchart TD
 
 To optimize latency and token cost while preventing unnecessary exploratory tool loops, every incoming request first passes through [`IntentRouter`](file:///c:/projects/ai-data-agent/app/agent/router.py).
 
-### Step 1: Classification (`gemini-3.1-flash-lite`)
-`gemini-3.1-flash-lite` inspects the user prompt and outputs a structured `RouterDecision` (`intent` and `reasoning`) with zero tools bound.
+### Step 1: Classification & Semantic Decomposition (`gemini-3.1-flash-lite`)
+`gemini-3.1-flash-lite` inspects the user prompt and outputs a structured `RouterDecision` with zero tools bound:
+- **`intent` & `reasoning`**: Classifies the query into one of the 4 intent categories and explains the decision.
+- **`metric_search_phrase`**: Decomposes the user inquiry into a natural semantic query phrase combining the metric/aggregation intent with domain context (e.g. `'total food spending expenses last month'`), optimized for dense vector cosine similarity search in `search_data_catalog`.
+- **`entity_keywords`**: Extracts specific domain entities, category names, or account names (e.g. `['food']`), prepared for discrete categorical validation via `get_dimension_values`.
 
 ### Step 2: Routed Model & Discrete Tool Allocation
 Based on the classified `intent`, `AgentRunner` selects the target Gemini model, allowed tools, and `max_iterations` ceiling:
@@ -90,9 +93,9 @@ The agent interacts with the semantic layer and data lakehouse via 4 specialized
 The core orchestration resides in [`AgentRunner.run_query()`](file:///c:/projects/ai-data-agent/app/agent/runner.py):
 
 1. **Router Classification (`Step 1`)**: Records an `intent_router` thought step detailing the chosen intent, target model, and step budget.
-2. **Dynamic Context Envelope Injection**:
-   - Dynamically inspects DuckDB (`duckdb_tool.get_temporal_bounds()`) to discover the recorded lakehouse calendar bounds (`2026-01 to 2026-10`).
-   - Injects the Context Envelope into the agent's system context, giving the model zero-shot temporal grounding without hardcoding dates.
+2. **Dynamic Context Envelope Injection & Semantic Guidance**:
+   - Dynamically inspects DuckDB (`duckdb_tool.get_temporal_bounds()`) to discover recorded lakehouse calendar bounds (`2026-01 to 2026-10`).
+   - Injects the Context Envelope with zero-shot temporal grounding and semantic decomposition guidance (`metric_search_phrase` and `entity_keywords`), directing the agent to search the catalog with enriched domain phrases rather than isolated keywords.
 3. **Unrestricted ReAct Iteration Step (up to `max_iterations`)**:
    - Passes message history to `routed_llm_with_tools.invoke(messages)`.
    - Allows natural multi-step introspection (e.g. search catalog $\rightarrow$ inspect values $\rightarrow$ execute SQL).

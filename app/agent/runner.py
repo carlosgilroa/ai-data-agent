@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 @tool
 def search_data_catalog(query: str) -> str:
     """Search the LookML semantic catalog for business metrics, calculation formulas,
-    dimension definitions, and explore structures. Use this first to discover verified metrics
-    and their parent tables/views without guessing formulas or names.
+    dimension definitions, and explore structures.
+    Best Practice: Use the recommended metric search phrase from the runtime context or a complete
+    analytical phrase (e.g. 'total food spending expenses' or 'monthly savings rate') rather than an isolated keyword.
+    Dense semantic vector search matches best on complete contextual phrases.
     """
     return raw_search_catalog(
         query,
@@ -176,9 +178,9 @@ class AgentRunner:
     def run_query(self, request: QueryRequest) -> QueryResponse:
         """Execute two-step routed ReAct loop:
         1. Check API key presence.
-        2. Classify user intent via IntentRouter (gemini-3.1-flash-lite).
+        2. Classify user intent & extract semantic query decomposition via IntentRouter (gemini-3.1-flash-lite).
         3. Route to target model & discrete tool configuration.
-        4. Dynamically inject lakehouse Context Envelope.
+        4. Dynamically inject lakehouse Context Envelope with semantic guidance.
         5. Synthesize grounded final answer.
         """
         start_time = time.time()
@@ -207,7 +209,7 @@ class AgentRunner:
         has_session_context = bool(session_id and session_id in self.sessions)
 
         # -----------------------------------------------------------------
-        # Step 1: Two-Step Intent Router Classification (gemini-3.1-flash-lite)
+        # Step 1: Two-Step Intent Router Classification & Semantic Decomposition
         # -----------------------------------------------------------------
         decision = intent_router.classify(request.query, has_session_context=has_session_context)
         target_model, max_iterations, allowed_tool_names = intent_router.get_route_config(decision.intent)
@@ -227,10 +229,13 @@ class AgentRunner:
                     "max_iterations": max_iterations,
                     "allowed_tools": allowed_tool_names,
                     "reasoning": decision.reasoning,
+                    "metric_search_phrase": decision.metric_search_phrase,
+                    "entity_keywords": decision.entity_keywords,
                 },
                 thought=(
                     f"Router ({settings.GEMINI_ROUTER_MODEL}) classified intent as '{decision.intent}' "
-                    f"({decision.reasoning}) -> routed to '{target_model}' with max_iterations={max_iterations}"
+                    f"({decision.reasoning}) -> routed to '{target_model}' with max_iterations={max_iterations}. "
+                    f"Metric query hint: '{decision.metric_search_phrase}', Entities: {decision.entity_keywords}"
                 ),
             )
         )
@@ -238,7 +243,7 @@ class AgentRunner:
 
         base_llm, routed_llm_with_tools = self._get_or_create_llm(target_model, allowed_tool_names)
 
-        # Dynamic Lakehouse Context Envelope: Inject global temporal bounds into system context
+        # Dynamic Lakehouse Context Envelope: Inject global temporal bounds & semantic query guidance
         min_date, max_date = duckdb_tool.get_temporal_bounds()
         context_envelope = ""
         if min_date and max_date:
@@ -247,6 +252,14 @@ class AgentRunner:
                 f"- Recorded Date Range: {min_date} to {max_date}\n"
                 f"- Relative temporal expressions (such as 'last month', 'latest month', 'previous quarter', or 'current year') "
                 f"MUST be anchored to this latest recorded period ({max_date})."
+            )
+
+        if decision.metric_search_phrase or decision.entity_keywords:
+            context_envelope += (
+                f"\n\n### SEMANTIC QUERY DECOMPOSITION (GUIDANCE):\n"
+                f"- Recommended Catalog Metric Search: '{decision.metric_search_phrase or request.query}'\n"
+                f"- Identified Domain Entities: {decision.entity_keywords}\n"
+                f"Always invoke search_data_catalog first with the recommended metric search phrase to discover the relevant table and metrics before calling get_dimension_values. Only query dimension values on tables confirmed to exist in the catalog."
             )
 
         # Multi-turn session memory retrieval

@@ -7,17 +7,19 @@ from app.schemas.query import IntentType, RouterDecision
 
 logger = logging.getLogger(__name__)
 
-ROUTER_SYSTEM_PROMPT = """You are an Intent Classification Router for a personal finance and lakehouse analytics AI agent.
-Your sole responsibility is to classify the user's message into one of four intent categories:
+ROUTER_SYSTEM_PROMPT = """You are an Intent Classification & Semantic Query Router for a personal finance and lakehouse analytics AI agent.
+Your responsibility is twofold:
 
-1. "out_of_scope":
-   - Questions completely unrelated to personal finance, expenses, income, cashflow, budgets, currencies, accounting, or the data lakehouse (e.g., general trivia, weather, sports, coding tasks unrelated to our financial data, recipes).
-2. "capabilities":
-   - Questions asking what you can do, how you work, what tools or tables you have access to, or general greetings asking for help with the system.
-3. "simple_query":
-   - Direct single-metric lookups, distinct counts, metadata lookups, or single-table aggregations (e.g., "How many spend categories do we have?", "What was my total spend in March 2026?", "List my accounts").
-4. "complex_query":
-   - Multi-hop analytical questions, period-over-period comparisons, Tier 1 vs Tier 2 accounting reconciliations, multi-currency FX analysis, budget variance diagnostics, or queries requiring multiple SQL queries/joins.
+1. Intent Classification:
+   Classify the user's message into one of four intent categories:
+   - "out_of_scope": Questions completely unrelated to personal finance, expenses, income, cashflow, budgets, currencies, accounting, or the data lakehouse.
+   - "capabilities": Questions asking what you can do, how you work, what tools or tables you have access to.
+   - "simple_query": Direct single-metric lookups, distinct counts, category spend aggregations, or single-table aggregations.
+   - "complex_query": Multi-hop analytical questions, period-over-period comparisons, Tier 1 vs Tier 2 accounting reconciliations, multi-currency FX analysis, budget variance diagnostics.
+
+2. Semantic Query Decomposition (for analytical queries):
+   - "metric_search_phrase": Construct a natural analytical search phrase combining the metric/calculation intent with domain context suitable for dense vector catalog search (e.g. "total food spending expenses", "monthly savings rate", "net cashflow after refunds", "transportation expenses").
+   - "entity_keywords": Extract domain entities, category keywords, merchants, accounts, or currencies (e.g. ["food"], ["transportation"], ["bancolombia"]).
 """
 
 
@@ -59,7 +61,7 @@ class IntentRouter:
             self.structured_llm = None
 
     def classify(self, query: str, has_session_context: bool = False) -> RouterDecision:
-        """Classify user query into an IntentType using gemini-3.1-flash-lite."""
+        """Classify user query into an IntentType and extract semantic search parameters using gemini-3.1-flash-lite."""
         self._ensure_llm()
         if self.structured_llm is None:
             raise RuntimeError(
@@ -92,7 +94,10 @@ class IntentRouter:
                 messages
                 + [
                     HumanMessage(
-                        content='Respond ONLY with valid JSON: {"intent": "out_of_scope"|"capabilities"|"simple_query"|"complex_query", "reasoning": "..."}'
+                        content=(
+                            'Respond ONLY with valid JSON: {"intent": "out_of_scope"|"capabilities"|"simple_query"|"complex_query", '
+                            '"reasoning": "...", "metric_search_phrase": "...", "entity_keywords": ["..."]}'
+                        )
                     )
                 ]
             )
@@ -103,6 +108,8 @@ class IntentRouter:
                 return RouterDecision(
                     intent=parsed.get("intent", "simple_query"),
                     reasoning=parsed.get("reasoning", "Parsed via JSON fallback."),
+                    metric_search_phrase=parsed.get("metric_search_phrase"),
+                    entity_keywords=parsed.get("entity_keywords", []),
                 )
             except Exception:
                 pass
