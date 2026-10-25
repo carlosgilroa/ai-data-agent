@@ -115,14 +115,20 @@ class IntentRouter:
     @staticmethod
     def get_route_config(intent: IntentType) -> Tuple[str, int, List[str]]:
         """Map classified intent to (target_model_name, max_iterations, allowed_tool_names)."""
+        all_analytical_tools = [
+            "search_data_catalog",
+            "get_table_schema",
+            "get_dimension_values",
+            "run_sql_query",
+        ]
         if intent == "out_of_scope":
             return (settings.GEMINI_ROUTER_MODEL, 0, [])
         if intent == "capabilities":
-            return (settings.GEMINI_ROUTER_MODEL, 1, ["search_data_catalog"])
+            return (settings.GEMINI_ROUTER_MODEL, 2, ["search_data_catalog", "get_table_schema"])
         if intent == "simple_query":
-            return (settings.GEMINI_SIMPLE_MODEL, 4, ["search_data_catalog", "run_sql_query"])
+            return (settings.GEMINI_SIMPLE_MODEL, 6, all_analytical_tools)
         # complex_query
-        return (settings.GEMINI_MODEL, 6, ["search_data_catalog", "run_sql_query"])
+        return (settings.GEMINI_MODEL, 8, all_analytical_tools)
 
 
 intent_router = IntentRouter()

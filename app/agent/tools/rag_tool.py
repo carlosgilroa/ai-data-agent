@@ -12,8 +12,8 @@ def search_data_catalog(
     top_k: Optional[int] = None,
     min_similarity: Optional[float] = None,
 ) -> str:
-    """Tool for AI Agent: Search data dictionary and LookML catalog for definitions,
-    metric formulas, table schemas, and business rules filtered by cosine similarity.
+    """Tool for AI Agent: Search LookML semantic catalog for metric definitions,
+    calculation formulas, dimensions, and join structures filtered by cosine similarity.
     """
     try:
         items: List[CatalogItem] = vector_store.search(
@@ -26,8 +26,6 @@ def search_data_catalog(
             return f"No catalog items matched query: '{query}' above similarity threshold ({threshold})."
 
         formatted_docs = []
-        matched_ids = {item.id for item in items}
-
         for i, item in enumerate(items, 1):
             formula = f" | SQL: {item.sql_formula}" if item.sql_formula else ""
             table = f" | Table: {item.table_name}" if item.table_name else ""
@@ -41,25 +39,38 @@ def search_data_catalog(
                 f"    Description: {item.description}"
             )
 
-        # Attach physical/derived table column schema ONLY for the single top-1 referenced table
-        top_table = None
-        for item in items:
-            if item.table_name:
-                top_table = item.table_name
-                break
-            elif item.view:
-                top_table = item.view
-                break
-
-        if top_table:
-            tbl_id = f"table.{top_table}"
-            view_id = f"view.{top_table}"
-            if tbl_id not in matched_ids and view_id not in matched_ids:
-                tbl_item = vector_store.get_by_id(tbl_id) or vector_store.get_by_id(view_id)
-                if tbl_item and tbl_item.description:
-                    formatted_docs.append(f"[Table Schema: {top_table}] {tbl_item.description}")
-
         return "\n\n".join(formatted_docs)
     except Exception as e:
         logger.error("RAG tool failed: %s", e)
         return f"Error querying semantic catalog: {str(e)}"
+
+
+def get_table_schema(table_name: str) -> str:
+    """Retrieve detailed schema for a specific lakehouse table or LookML derived table (PDT),
+    including row grain, primary key, row count stats, date coverage, and column types.
+    """
+    try:
+        from app.agent.tools.duckdb_tool import duckdb_tool
+
+        clean_name = table_name.strip().strip("`").strip("'").strip('"')
+        tbl_id = f"table.{clean_name}"
+        view_id = f"view.{clean_name}"
+
+        tbl_item = vector_store.get_by_id(tbl_id) or vector_store.get_by_id(view_id)
+        if tbl_item and tbl_item.description:
+            return f"[Table Schema: {clean_name}] {tbl_item.description}"
+
+        # Fallback to inspecting live DuckDB table if present
+        available = duckdb_tool.get_available_tables()
+        matched = next((t for t in available if t.lower() == clean_name.lower()), None)
+        if matched:
+            cols = duckdb_tool.get_table_columns(matched)
+            return f"[Table Schema: {matched}] Available columns: {', '.join(cols)}"
+
+        return (
+            f"Table '{table_name}' was not found in the lakehouse catalog. "
+            f"Available tables: {', '.join(available)}."
+        )
+    except Exception as e:
+        logger.error("get_table_schema failed: %s", e)
+        return f"Error retrieving schema for '{table_name}': {str(e)}"

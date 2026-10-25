@@ -52,8 +52,9 @@ flowchart TD
 ## Key Features
 
 1. **Two-Step Intent Router & Autonomous ReAct Loop**:
-   - Classifies incoming queries via `gemini-3.1-flash-lite` into `out_of_scope` (`0` steps), `capabilities` (`1` catalog step on `gemini-3.1-flash-lite`), `simple_query` (`4` steps on `gemini-3.5-flash-lite`), or `complex_query` (`6` steps on `gemini-3.8-flash`).
-   - Binds first-class LangChain tools (`search_data_catalog`, `run_sql_query`) directly to the routed Gemini model with **dynamic tool masking** (disabling `search_data_catalog` via API configuration after first invocation to eliminate repetitive catalog search loops).
+   - Classifies incoming queries via `gemini-3.1-flash-lite` into `out_of_scope` (`0` steps), `capabilities` (`2` steps on `gemini-3.1-flash-lite`), `simple_query` (`6` steps on `gemini-3.5-flash-lite`), or `complex_query` (`8` steps on `gemini-3.8-flash`).
+   - Binds discrete modular semantic tools (`search_data_catalog`, `get_table_schema`, `get_dimension_values`, `run_sql_query`) directly to the routed Gemini model with unrestricted multi-step introspection.
+   - Dynamically injects a **Lakehouse Context Envelope** (recorded date bounds from DuckDB) into runtime system context for zero-shot temporal anchoring without hardcoded dates.
    - Minimalist zero-shot system prompt without hardcoded schemas or tools; uses native API tool-binding schema definitions and strict financial grounding against hallucinations.
    - Provides explicit error feedback (`400 Bad Request`) when `GEMINI_API_KEY` is missing, eliminating brittle heuristics.
 2. **Multi-Turn Conversational Session Memory**:
@@ -65,7 +66,7 @@ flowchart TD
 4. **LookML as Single Source of Truth & Cosine Similarity Filtering**:
    - Wipes ChromaDB clean (`vector_store.clear()`) on every re-index and uses the native `lkml` parser to extract measures (with `filters__all` and aggregation wrappers), dimensions, `dimension_groups`, `CASE` statements, derived tables (`pdt_category_mom_velocity`), explores, and joins from `projects/wallet-lookml`.
    - Maps LookML `sql_table_name` definitions directly (via `_strip_lookml_table_macro`) to the 7 physical Parquet lakehouse tables (`master_records`, `dim_accounts`, `dim_categories`, `dim_labels`, `fx_rates`, `mart_monthly_pnl`, `mart_expense_summary`) without hardcoded view-resolution heuristics.
-   - Computes cosine similarity (`1 - distance`), filters out low-relevance noise using an absolute noise floor (`0.20`) and dynamic 80% relative threshold, and attaches the complete physical column schema strictly for the **single top-scoring referenced table** directly to `search_data_catalog` results.
+   - Computes cosine similarity (`1 - distance`), filters out low-relevance noise using an absolute noise floor (`0.20`) and dynamic 80% relative threshold, with decoupled on-demand schema inspection via `get_table_schema` and categorical entity resolution via `get_dimension_values`.
 5. **Safe AST-Guarded SQL Execution**:
    - Strict read-only enforcement allowing only `SELECT` and `WITH` statements.
    - Regex-based AST safety blocking mutation keywords (`DROP`, `DELETE`, `INSERT`, `ALTER`, `ATTACH`).

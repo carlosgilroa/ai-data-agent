@@ -300,27 +300,29 @@ class SemanticCatalogIndexer:
             ("fx_rates", settings.silver_fx_path, "Daily foreign exchange conversion rates (USD, EUR, COP, GBP)"),
             ("mart_monthly_pnl", settings.gold_pnl_path, "Pre-aggregated monthly P&L financial mart with net cashflow and savings rate"),
             ("mart_expense_summary", settings.gold_expense_summary_path, "Monthly expense breakdown with budget caps and variances"),
+            ("pdt_category_mom_velocity", None, "LookML Persistent Derived Table tracking monthly category spend acceleration and 3-month rolling averages"),
         ]
 
-        conn = duckdb.connect(":memory:")
+        from app.agent.tools.duckdb_tool import duckdb_tool
+        conn = duckdb_tool.conn
+
         for table_name, file_path, desc in tables:
-            if not file_path.exists():
+            if file_path is not None and not file_path.exists():
                 continue
             try:
-                # Use native fetchall() without pandas
-                posix_path = file_path.as_posix()
-                res = conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{posix_path}')").fetchall()
+                # Use native fetchall() from conformed DuckDB views
+                res = conn.execute(f"DESCRIBE {table_name}").fetchall()
                 col_names = [row[0] for row in res]
                 cols = [f"{row[0]} ({row[1]})" for row in res]
 
                 # Dynamic statistics: row count & date coverage
-                total_rows = conn.execute(f"SELECT COUNT(*) FROM read_parquet('{posix_path}')").fetchone()[0]
+                total_rows = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
 
                 date_info = ""
                 if "year_month" in col_names:
                     try:
                         min_ym, max_ym = conn.execute(
-                            f"SELECT MIN(year_month), MAX(year_month) FROM read_parquet('{posix_path}')"
+                            f"SELECT MIN(year_month), MAX(year_month) FROM {table_name}"
                         ).fetchone()
                         if min_ym and max_ym:
                             date_info = f"Date Coverage: {min_ym} to {max_ym}"
@@ -329,7 +331,7 @@ class SemanticCatalogIndexer:
                 elif "date" in col_names:
                     try:
                         min_dt, max_dt = conn.execute(
-                            f"SELECT MIN(date), MAX(date) FROM read_parquet('{posix_path}')"
+                            f"SELECT MIN(date), MAX(date) FROM {table_name}"
                         ).fetchone()
                         if min_dt and max_dt:
                             date_info = f"Date Coverage: {min_dt} to {max_dt}"
@@ -349,6 +351,7 @@ class SemanticCatalogIndexer:
                 desc_parts.append(f"Available columns: {', '.join(cols)}")
 
                 full_desc = " | ".join(desc_parts)
+                sql_source = f"read_parquet('{file_path.as_posix()}')" if file_path else f"SELECT * FROM {table_name}"
 
                 items.append(
                     CatalogItem(
@@ -357,13 +360,13 @@ class SemanticCatalogIndexer:
                         name=table_name,
                         view=table_name,
                         description=full_desc,
-                        sql_formula=f"read_parquet('{posix_path}')",
+                        sql_formula=sql_source,
                         table_name=table_name,
                         examples=[f"Query {table_name}", f"Inspect data in {table_name}"]
                     )
                 )
             except Exception as e:
-                logger.error("Failed to describe parquet table %s: %s", table_name, e)
+                logger.error("Failed to describe table %s: %s", table_name, e)
 
         return items
 

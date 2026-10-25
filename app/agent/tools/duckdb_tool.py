@@ -2,7 +2,7 @@ import time
 import logging
 import math
 from decimal import Decimal
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import duckdb
 from app.core.config import settings
 
@@ -139,6 +139,81 @@ class DuckDBTool:
             return [row[0] for row in res]
         except Exception:
             return []
+
+    def get_table_columns(self, table: str) -> List[str]:
+        """Return list of column names for a given table or view."""
+        try:
+            res = self.conn.execute(f"DESCRIBE {table}").fetchall()
+            return [row[0] for row in res]
+        except Exception:
+            return []
+
+    def get_dimension_values(
+        self,
+        table: str,
+        column: str,
+        pattern: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[str]:
+        """Retrieve distinct or sample values for a categorical column safely.
+        Validates table and column names to prevent SQL injection.
+        """
+        active_tables = self.get_available_tables()
+        clean_tbl = table.strip()
+        matched_tbl = next((t for t in active_tables if t.lower() == clean_tbl.lower()), None)
+        if not matched_tbl:
+            raise ValueError(
+                f"Table '{table}' does not exist in lakehouse database. Available tables: {active_tables}"
+            )
+
+        active_columns = self.get_table_columns(matched_tbl)
+        clean_col = column.strip()
+        matched_col = next((c for c in active_columns if c.lower() == clean_col.lower()), None)
+        if not matched_col:
+            raise ValueError(
+                f"Column '{column}' does not exist in table '{matched_tbl}'. Available columns: {active_columns}"
+            )
+
+        safe_limit = max(1, min(limit, 100))
+
+        if pattern and pattern.strip():
+            query = (
+                f"SELECT DISTINCT {matched_col} FROM {matched_tbl} "
+                f"WHERE CAST({matched_col} AS VARCHAR) ILIKE ? AND {matched_col} IS NOT NULL "
+                f"ORDER BY 1 LIMIT ?"
+            )
+            res = self.conn.execute(query, [f"%{pattern.strip()}%", safe_limit]).fetchall()
+        else:
+            query = (
+                f"SELECT DISTINCT {matched_col} FROM {matched_tbl} "
+                f"WHERE {matched_col} IS NOT NULL ORDER BY 1 LIMIT ?"
+            )
+            res = self.conn.execute(query, [safe_limit]).fetchall()
+
+        return [str(row[0]) for row in res]
+
+    def get_temporal_bounds(self) -> Tuple[Optional[str], Optional[str]]:
+        """Return (min_period, max_period) across lakehouse gold/silver marts."""
+        for tbl in ["mart_monthly_pnl", "mart_expense_summary"]:
+            try:
+                res = self.conn.execute(
+                    f"SELECT MIN(year_month), MAX(year_month) FROM {tbl}"
+                ).fetchone()
+                if res and res[0] and res[1]:
+                    return (str(res[0]), str(res[1]))
+            except Exception:
+                continue
+
+        try:
+            res = self.conn.execute(
+                "SELECT MIN(date), MAX(date) FROM master_records"
+            ).fetchone()
+            if res and res[0] and res[1]:
+                return (str(res[0]), str(res[1]))
+        except Exception:
+            pass
+
+        return (None, None)
 
 
 # Global singleton instance

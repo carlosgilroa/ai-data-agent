@@ -1,50 +1,46 @@
-# AI Data Agent: System Architecture & Two-Step ReAct Orchestration
+# Agent Architecture: Two-Step Intent Routing & Discrete Modular Semantic Tools
 
-This document details the architectural design, two-step intent routing, reasoning loop, session memory management, and safety mechanisms of the **AI Data Agent** (`app/agent/`).
+This document outlines the architecture, routing mechanics, tool definitions, and conversational memory powering the **Autonomous AI Data Agent** in `app/agent/`.
 
 ---
 
-## 1. Architectural Overview
+## 1. System Overview
 
-The AI Data Agent is an autonomous, multi-tier tool-calling reasoning engine built with **LangChain** and **Google Gemini** (`gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`, and `gemini-3.8-flash`). It bridges natural language financial and data engineering queries to local columnar lakehouse tables (`projects/wallet/data/`) using verified LookML semantic models (`projects/wallet-lookml/`).
+The AI Data Agent is designed following industry patterns (Snowflake Cortex Analyst, Looker MCP, Cube, Wren AI). It bridges the context gap between natural language questions and the local DuckDB lakehouse via the **LookML semantic layer**:
 
-```
-                              +---------------------------+
-                              |   Client (REST / UI)      |
-                              +-------------+-------------+
-                                            |
-                                            | POST /api/v1/agent/query
-                                            v
-+-----------------------------------------------------------------------------------------+
-|                                    AgentRunner                                          |
-|                                                                                         |
-|  +-----------------------------------------------------------------------------------+  |
-|  | Step 1: Two-Step IntentRouter (gemini-3.1-flash-lite)                             |  |
-|  | Classifies query into: out_of_scope | capabilities | simple_query | complex_query |  |
-|  +----------------------------------------+------------------------------------------+  |
-|                                           |                                             |
-|        +----------------------+-----------+-----------+----------------------+          |
-|        | out_of_scope         | capabilities          | simple_query         | complex  |
-|        v (0 tool steps)       v (max 1 step)          v (max 4 steps)        v (max 6)  |
-|  +----------------+   +-------------------+   +--------------------+   +--------------+ |
-|  | 3.1-flash-lite |   | 3.1-flash-lite    |   | 3.5-flash-lite     |   | 3.8-flash    | |
-|  | (No tools)     |   | (Catalog tool)    |   | (Catalog + DuckDB) |   | (Full ReAct) | |
-|  +----------------+   +---------+---------+   +---------+----------+   +------+-------+ |
-|                                 |                       |                     |         |
-|                                 +-----------+-----------+---------------------+         |
-|                                             |                                           |
-|                                             v                                           |
-|                      +---------------------------+       +----------------------------+ |
-|                      |   search_data_catalog     |       |       run_sql_query        | |
-|                      | (Cosine similarity >=0.28)|       |  (Read-Only AST Lakehouse) | |
-|                      +-------------+-------------+       +--------------+-------------+ |
-+------------------------------------|------------------------------------|---------------+
-                                     |                                    |
-                                     v                                    v
-                       +---------------------------+       +----------------------------+
-                       |   ChromaDB Vector Store   |       |  Parquet Lakehouse Tables  |
-                       |  (LookML Semantics & AST) |       |  (master_records, fx_rates)|
-                       +---------------------------+       +----------------------------+
+```mermaid
+flowchart TD
+    User([User Ingestion / REST Request]) --> Router[1. IntentRouter: gemini-3.1-flash-lite]
+    
+    subgraph RoutingDecision["Intent Classification & Budgeting"]
+        Router -->|out_of_scope: 0 steps| OOS[Polite Scope Refusal]
+        Router -->|capabilities: 2 steps| Cap[Grounding: Catalog & Schema Introspection]
+        Router -->|simple_query: 6 steps| Simple[Fast Execution: gemini-3.5-flash-lite]
+        Router -->|complex_query: 8 steps| Complex[Deep Multi-Hop: gemini-3.8-flash]
+    end
+
+    subgraph RuntimeEnvelope["Lakehouse Context Envelope"]
+        Simple --> Env["Dynamic Temporal Grounding (Recorded Min/Max Date Bounds)"]
+        Complex --> Env
+        Cap --> Env
+    end
+
+    subgraph AgentLoop["Autonomous ReAct Loop"]
+        Env --> Runner[AgentRunner]
+        Runner <--> T1["search_data_catalog: LookML Metrics & Dimensions"]
+        Runner <--> T2["get_table_schema: Grain, PK, Stats & Column Types"]
+        Runner <--> T3["get_dimension_values: Distinct Entity / Category Lookups"]
+        Runner <--> T4["run_sql_query: Safe Read-Only DuckDB Execution"]
+        
+        subgraph Lakehouse["Analytical Lakehouse & PDTs"]
+            T3 <--> DuckDB[(DuckDB In-Memory Engine)]
+            T4 <--> DuckDB
+            DuckDB --> Parquet["silver / gold Parquet Tables"]
+            DuckDB --> LookMLPDT["LookML Derived Table Views (PDTs)"]
+        end
+    end
+
+    Runner -->|Synthesized Answer + SQL + Traceability| Output([Executive Markdown Response])
 ```
 
 ---
@@ -56,29 +52,36 @@ To optimize latency and token cost while preventing unnecessary exploratory tool
 ### Step 1: Classification (`gemini-3.1-flash-lite`)
 `gemini-3.1-flash-lite` inspects the user prompt and outputs a structured `RouterDecision` (`intent` and `reasoning`) with zero tools bound.
 
-### Step 2: Routed Model & Dynamic Iteration Budget
+### Step 2: Routed Model & Discrete Tool Allocation
 Based on the classified `intent`, `AgentRunner` selects the target Gemini model, allowed tools, and `max_iterations` ceiling:
 
 | Intent Category | Target Execution Model | Allowed Tools | `max_iterations` | Purpose |
 |:---|:---|:---|:---:|:---|
 | `out_of_scope` | `gemini-3.1-flash-lite` | *None* | `0` | Politely declines non-financial/unrelated trivia questions without touching ChromaDB or DuckDB. |
-| `capabilities` | `gemini-3.1-flash-lite` | `search_data_catalog` | `1` | Grounds "what can you do?" responses in live indexed LookML tables/metrics. |
-| `simple_query` | `gemini-3.5-flash-lite` | `search_data_catalog`, `run_sql_query` | `4` | Fast, cost-efficient execution for single-metric lookups, counts, and single-table aggregations. |
-| `complex_query` | `gemini-3.8-flash` | `search_data_catalog`, `run_sql_query` | `6` | Deep multi-hop reasoning, period-over-period comparisons, Tier 1 vs Tier 2 reconciliations, and joins. |
+| `capabilities` | `gemini-3.1-flash-lite` | `search_data_catalog`, `get_table_schema` | `2` | Grounds "what can you do?" responses in live indexed LookML tables and metric definitions. |
+| `simple_query` | `gemini-3.5-flash-lite` | `search_data_catalog`, `get_table_schema`, `get_dimension_values`, `run_sql_query` | `6` | Fast, cost-efficient execution for single-metric lookups, category spend aggregations, and counts. |
+| `complex_query` | `gemini-3.8-flash` | `search_data_catalog`, `get_table_schema`, `get_dimension_values`, `run_sql_query` | `8` | Deep multi-hop reasoning, period-over-period comparisons, Tier 1 vs Tier 2 reconciliations, and joins. |
 
 ---
 
-## 3. Minimalist Prompt Design
+## 3. Discrete Modular Semantic Tools
 
-Unlike legacy agents that overload the system prompt with hardcoded table schemas, database columns, business rules, or tool instructions, the AI Data Agent enforces a **pure minimalist prompt** ([`app/agent/prompts.py`](file:///c:/projects/ai-data-agent/app/agent/prompts.py)).
+The agent interacts with the semantic layer and data lakehouse via 4 specialized, decoupled tools:
 
-### Principles
-1. **Dynamic Tool Schema via API**: Tool descriptions, parameters, and types are declared natively as LangChain `@tool` definitions and bound directly to Gemini via `llm.bind_tools(...)`.
-2. **No Hardcoded Schemas or Rules**: Table schemas, LookML view definitions, accounting logic (e.g. transfers vs expenses, multi-currency conversion), and join conditions reside strictly in LookML and DuckDB.
-3. **Role & Grounding Directives Only**:
-   - Instructs the agent on analytical persona (Senior Financial Analyst & Analytics Engineer).
-   - Enforces grounding: never invent metrics, dimensions, or tables.
-   - Enforces tool usage: search catalog for metric definitions before writing SQL; execute SQL to verify data before answering.
+1. **`search_data_catalog(query: str)`**:
+   - Searches the LookML semantic catalog via cosine similarity with an 80% relative cutoff.
+   - Returns clean metric and dimension definitions with LookML calculation formulas, description notes, and view/table bindings.
+   - Does **not** dump raw schema footers, preventing context window pollution.
+2. **`get_table_schema(table_name: str)`**:
+   - On-demand schema inspection for any physical Parquet table or LookML persistent derived table (PDT).
+   - Returns explicit row grain, compound primary key, row count stats, date coverage (`min to max`), and column names with data types.
+3. **`get_dimension_values(table_name: str, column_name: str, pattern: Optional[str], limit: int)`**:
+   - Directly queries distinct categorical values (e.g. category names, merchants, accounts) from DuckDB matching an optional pattern.
+   - SQL-injection safe: validates table and column names against live database metadata before executing parameterized queries.
+   - Eliminates exploratory `SELECT DISTINCT` queries from the model's analytical step budget.
+4. **`run_sql_query(sql: str)`**:
+   - Executes safe read-only SQL queries against DuckDB views.
+   - Regex-guarded against data modification statements (`DROP`, `DELETE`, `INSERT`, `ALTER`, `ATTACH`).
 
 ---
 
@@ -87,16 +90,17 @@ Unlike legacy agents that overload the system prompt with hardcoded table schema
 The core orchestration resides in [`AgentRunner.run_query()`](file:///c:/projects/ai-data-agent/app/agent/runner.py):
 
 1. **Router Classification (`Step 1`)**: Records an `intent_router` thought step detailing the chosen intent, target model, and step budget.
-2. **Out-of-Scope Short Path**: If `intent == "out_of_scope"`, invokes `gemini-3.1-flash-lite` without tools to return a polite scope refusal.
-3. **ReAct Iteration Step (up to `max_iterations`)**:
-   - Passes message history to `active_llm.invoke(messages)`.
-   - **Dynamic Tool Masking**: Once `search_data_catalog` has been executed, `AgentRunner` dynamically masks it from the bound tools by binding only the remaining analytical tools (`["run_sql_query"]`) via `_get_or_create_llm()` and enforcing an execution-time guard. This prevents the agent from entering redundant consecutive catalog search loops and guarantees that subsequent steps focus strictly on analytical SQL execution.
-   - Executes `search_data_catalog` (cosine similarity filtered with dynamic 80% relative cutoff) or `run_sql_query` (safe DuckDB execution with generalized docstring).
-   - Captures output into an `AgentThoughtStep` for full observability.
+2. **Dynamic Context Envelope Injection**:
+   - Dynamically inspects DuckDB (`duckdb_tool.get_temporal_bounds()`) to discover the recorded lakehouse calendar bounds (`2026-01 to 2026-10`).
+   - Injects the Context Envelope into the agent's system context, giving the model zero-shot temporal grounding without hardcoding dates.
+3. **Unrestricted ReAct Iteration Step (up to `max_iterations`)**:
+   - Passes message history to `routed_llm_with_tools.invoke(messages)`.
+   - Allows natural multi-step introspection (e.g. search catalog $\rightarrow$ inspect values $\rightarrow$ execute SQL).
+   - Captures each tool call output into an `AgentThoughtStep` for full observability.
    - **Self-Correction on Error**: If DuckDB returns an error, the raw error is returned to Gemini in the `ToolMessage` for automatic query refinement.
 4. **Synthesis & Anti-Hallucination Directives**:
    - When Gemini outputs a response without tool calls (or when `max_iterations` is reached, using `tool_choice="none"`), it synthesizes a grounded analytical answer.
-   - Strictly enforced **Absolute Financial Grounding**: the model is forbidden from inventing or extrapolating numbers. If iteration limits are reached without executing a metric aggregation query, the agent reports preliminary findings and identified tables while explicitly stating that the final numerical calculation was not achieved.
+   - Strictly enforced **Absolute Financial Grounding**: the model is forbidden from inventing or extrapolating numbers. Every figure presented MUST come directly from rows returned by `run_sql_query`.
 
 ---
 
@@ -111,16 +115,4 @@ Conversational memory enables natural back-and-forth financial exploration:
   if len(messages) > 15:
       messages = [messages[0]] + messages[-14:]
   ```
-- **Lifecycle Management**:
-  - `DELETE /api/v1/agent/session/{session_id}` explicitly purges session state.
-
----
-
-## 6. SQL Safety & Execution Guardrails
-
-1. **Read-Only Enforced**:
-   - AST token inspection rejects any query containing mutating keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`, `REPLACE`, `TRUNCATE`, `GRANT`, `REVOKE`, `VACUUM`).
-2. **Table & Derived View Whitelist**:
-   - Queries can access the 7 verified lakehouse Parquet tables (`master_records`, `dim_accounts`, `dim_categories`, `dim_labels`, `fx_rates`, `mart_monthly_pnl`, `mart_expense_summary`) plus LookML Persistent Derived Tables compiled in DuckDB (`pdt_category_mom_velocity`).
-3. **Pure Python DuckDB Execution**:
-   - Native `.fetchall()` bindings ensure a fast, pandas-free memory footprint.
+- **Reset Endpoint**: `DELETE /api/v1/agent/session/{session_id}` clears state on demand.

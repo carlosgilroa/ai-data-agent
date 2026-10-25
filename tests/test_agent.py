@@ -1,7 +1,14 @@
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
-from app.agent.runner import agent_runner, search_data_catalog, run_sql_query
+from app.agent.runner import (
+    agent_runner,
+    search_data_catalog,
+    get_table_schema,
+    get_dimension_values,
+    run_sql_query,
+    TOOL_REGISTRY,
+)
 from app.schemas.query import QueryRequest
 from app.core.config import settings
 
@@ -9,13 +16,28 @@ client = TestClient(app)
 
 
 def test_agent_tools_execution():
-    """Verify first-class LangChain tools execute and return valid string outputs."""
-    # Test catalog search tool
+    """Verify all 4 first-class LangChain tools execute and return valid string outputs."""
+    # 1. Test catalog search tool (decoupled metrics & dimensions)
     cat_res = search_data_catalog.invoke({"query": "spend"})
     assert isinstance(cat_res, str)
     assert len(cat_res) > 0
 
-    # Test SQL execution tool (pure Python DuckDB without pandas)
+    # 2. Test schema retrieval tool
+    schema_res = get_table_schema.invoke({"table_name": "mart_expense_summary"})
+    assert isinstance(schema_res, str)
+    assert "[Table Schema: mart_expense_summary]" in schema_res
+    assert "Available columns" in schema_res
+
+    # 3. Test dimension values tool
+    dim_res = get_dimension_values.invoke({
+        "table_name": "mart_expense_summary",
+        "column_name": "category_name",
+        "pattern": "transport",
+    })
+    assert isinstance(dim_res, str)
+    assert "Public transport" in dim_res or "values" in dim_res
+
+    # 4. Test SQL execution tool (pure Python DuckDB without pandas)
     sql_res = run_sql_query.invoke({"sql": "SELECT 1 AS test_col, 'abc' AS label"})
     assert isinstance(sql_res, str)
     assert "test_col" in sql_res
@@ -24,7 +46,6 @@ def test_agent_tools_execution():
 
 def test_agent_unconfigured_api_key_raises_error():
     """Verify that when GEMINI_API_KEY is empty, agent_runner raises an explicit RuntimeError
-
     instead of silently returning a heuristic response.
     """
     original_key = settings.GEMINI_API_KEY
@@ -42,7 +63,6 @@ def test_agent_unconfigured_api_key_raises_error():
 
 def test_api_endpoint_returns_400_when_key_missing():
     """Verify that POST /api/v1/agent/query returns HTTP 400 with a descriptive error
-
     when GEMINI_API_KEY is not configured.
     """
     original_key = settings.GEMINI_API_KEY
@@ -91,6 +111,8 @@ def test_intent_router_route_config():
     """Verify two-step IntentRouter maps each intent to the expected model, step budget, and tools."""
     from app.agent.router import intent_router
 
+    all_tools = ["search_data_catalog", "get_table_schema", "get_dimension_values", "run_sql_query"]
+
     m_oos, steps_oos, tools_oos = intent_router.get_route_config("out_of_scope")
     assert m_oos == settings.GEMINI_ROUTER_MODEL
     assert steps_oos == 0
@@ -98,30 +120,57 @@ def test_intent_router_route_config():
 
     m_cap, steps_cap, tools_cap = intent_router.get_route_config("capabilities")
     assert m_cap == settings.GEMINI_ROUTER_MODEL
-    assert steps_cap == 1
-    assert tools_cap == ["search_data_catalog"]
+    assert steps_cap == 2
+    assert tools_cap == ["search_data_catalog", "get_table_schema"]
 
     m_sim, steps_sim, tools_sim = intent_router.get_route_config("simple_query")
     assert m_sim == settings.GEMINI_SIMPLE_MODEL
-    assert steps_sim == 4
-    assert tools_sim == ["search_data_catalog", "run_sql_query"]
+    assert steps_sim == 6
+    assert tools_sim == all_tools
 
     m_cmp, steps_cmp, tools_cmp = intent_router.get_route_config("complex_query")
     assert m_cmp == settings.GEMINI_MODEL
-    assert steps_cmp == 6
-    assert tools_cmp == ["search_data_catalog", "run_sql_query"]
+    assert steps_cmp == 8
+    assert tools_cmp == all_tools
 
 
-def test_rag_tool_single_top_table_schema_attachment():
-    """Verify search_data_catalog only attaches the schema for the single top-1 referenced table,
-
-    preventing context overload from dumping multiple competing table schemas.
-    """
+def test_search_data_catalog_is_decoupled_from_schemas():
+    """Verify search_data_catalog returns clean semantic items without dumping table schema footers."""
     res = search_data_catalog.invoke({"query": "monthly expense pnl summary"})
     assert isinstance(res, str)
-    # Count occurrences of schema footers
-    schema_count = res.count("[Table Schema:")
-    assert schema_count <= 1, f"Expected at most 1 table schema attached, found {schema_count}"
+    # Schemas are now decoupled into get_table_schema
+    assert "[Table Schema:" not in res
+
+
+def test_get_table_schema_tool():
+    """Verify get_table_schema retrieves schema with grain, row count stats, and date coverage."""
+    # Test physical gold mart
+    res = get_table_schema.invoke({"table_name": "mart_expense_summary"})
+    assert "[Table Schema: mart_expense_summary]" in res
+    assert "Grain:" in res
+    assert "Stats:" in res
+    assert "Date Coverage:" in res
+
+    # Test derived table PDT
+    pdt_res = get_table_schema.invoke({"table_name": "pdt_category_mom_velocity"})
+    assert "[Table Schema: pdt_category_mom_velocity]" in pdt_res
+    assert "Stats:" in pdt_res
+    assert "Date Coverage:" in pdt_res
+
+
+def test_get_dimension_values_tool():
+    """Verify get_dimension_values returns valid JSON with count and values list."""
+    res = get_dimension_values.invoke({
+        "table_name": "mart_expense_summary",
+        "column_name": "category_name",
+        "pattern": "transport",
+    })
+    import json
+    parsed = json.loads(res)
+    assert parsed["table"] == "mart_expense_summary"
+    assert parsed["column"] == "category_name"
+    assert parsed["count"] > 0
+    assert isinstance(parsed["values"], list)
 
 
 def test_rag_tool_no_match_clean_message():
@@ -141,6 +190,3 @@ def test_run_sql_query_docstring_is_generalized():
     assert "mart_expense_summary" not in doc
     assert "mart_monthly_pnl" not in doc
     assert "dim_accounts" not in doc
-
-
-

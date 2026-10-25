@@ -62,3 +62,32 @@ def test_query_master_records_if_present():
         )
         assert res["row_count"] == 1
         assert "total_transfers" in res["data"][0]
+
+
+def test_duckdb_get_dimension_values():
+    """Verify get_dimension_values returns distinct categorical values safely."""
+    # Test valid column with pattern
+    vals = duckdb_tool.get_dimension_values("mart_expense_summary", "category_name", pattern="transport")
+    assert isinstance(vals, list)
+    assert len(vals) > 0
+    assert any("transport" in v.lower() for v in vals)
+
+    # Test valid column without pattern
+    groups = duckdb_tool.get_dimension_values("mart_expense_summary", "category_group", limit=5)
+    assert len(groups) > 0
+
+    # Test invalid table raises ValueError
+    with pytest.raises(ValueError, match="does not exist in lakehouse database"):
+        duckdb_tool.get_dimension_values("non_existent_table", "col")
+
+    # Test invalid column raises ValueError
+    with pytest.raises(ValueError, match="does not exist in table"):
+        duckdb_tool.get_dimension_values("mart_expense_summary", "non_existent_col")
+
+
+def test_duckdb_get_temporal_bounds():
+    """Verify get_temporal_bounds returns valid min and max calendar dates."""
+    min_date, max_date = duckdb_tool.get_temporal_bounds()
+    assert min_date is not None
+    assert max_date is not None
+    assert min_date <= max_date

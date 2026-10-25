@@ -7,7 +7,10 @@ from langchain_core.tools import tool
 from app.core.config import settings
 from app.schemas.query import QueryRequest, QueryResponse, AgentThoughtStep
 from app.agent.tools.duckdb_tool import duckdb_tool
-from app.agent.tools.rag_tool import search_data_catalog as raw_search_catalog
+from app.agent.tools.rag_tool import (
+    search_data_catalog as raw_search_catalog,
+    get_table_schema as raw_get_table_schema,
+)
 from app.agent.prompts import AGENT_SYSTEM_PROMPT
 from app.agent.router import intent_router
 
@@ -15,21 +18,56 @@ logger = logging.getLogger(__name__)
 
 
 # -------------------------------------------------------------------------
-# First-Class LangChain Tools for Autonomous Agent
+# First-Class LangChain Tools for Autonomous Semantic Agent
 # -------------------------------------------------------------------------
 
 @tool
 def search_data_catalog(query: str) -> str:
-    """Search the LookML semantic catalog and lakehouse schema for business metric definitions,
-    calculation formulas, dimension names, and table structures. Call this whenever you need to find
-    how financial metrics (like total spend, net cashflow, savings rate, burn rate) are defined or what
-    tables and columns exist.
+    """Search the LookML semantic catalog for business metrics, calculation formulas,
+    dimension definitions, and explore structures. Use this first to discover verified metrics
+    and their parent tables/views without guessing formulas or names.
     """
     return raw_search_catalog(
         query,
         top_k=settings.RAG_TOP_K,
         min_similarity=settings.RAG_MIN_SIMILARITY,
     )
+
+
+@tool
+def get_table_schema(table_name: str) -> str:
+    """Retrieve detailed schema for a specific lakehouse table or LookML derived table (PDT),
+    including row grain, primary key, row count stats, date coverage, and column names with data types.
+    Use this when you know the table name and need its exact structure.
+    """
+    return raw_get_table_schema(table_name)
+
+
+@tool
+def get_dimension_values(
+    table_name: str,
+    column_name: str,
+    pattern: Optional[str] = None,
+    limit: int = 20,
+) -> str:
+    """Retrieve distinct or sample values for a categorical column (e.g. category_name,
+    category_group, merchant, account_name, currency) from a specific table.
+    Always provide a search pattern (e.g. pattern='transport' or pattern='uber') when looking for a specific
+    category, merchant, or account to immediately pinpoint valid strings in one call.
+    """
+    try:
+        values = duckdb_tool.get_dimension_values(table_name, column_name, pattern=pattern, limit=limit)
+        if not values:
+            pat_msg = f" matching '{pattern}'" if pattern else ""
+            return f"No values found for column '{column_name}' in table '{table_name}'{pat_msg}."
+        return json.dumps({
+            "table": table_name,
+            "column": column_name,
+            "count": len(values),
+            "values": values,
+        }, default=str)
+    except Exception as e:
+        return f"Error retrieving dimension values: {str(e)}"
 
 
 @tool
@@ -56,6 +94,8 @@ def run_sql_query(sql: str) -> str:
 
 TOOL_REGISTRY = {
     "search_data_catalog": search_data_catalog,
+    "get_table_schema": get_table_schema,
+    "get_dimension_values": get_dimension_values,
     "run_sql_query": run_sql_query,
 }
 
@@ -66,7 +106,7 @@ TOOL_REGISTRY = {
 
 class AgentRunner:
     """Autonomous tool-calling ReAct agent orchestrating two-step intent routing,
-    LookML catalog RAG, multi-step LLM reasoning, conversational session memory,
+    discrete LookML semantic tools, multi-step LLM reasoning, conversational session memory,
     and safe DuckDB analytical execution.
     """
 
@@ -90,7 +130,7 @@ class AgentRunner:
         if self.api_key and self.api_key.strip() not in ("", "your_gemini_api_key_here"):
             try:
                 self.llm, self.llm_with_tools = self._get_or_create_llm(
-                    self.model_name, ["search_data_catalog", "run_sql_query"]
+                    self.model_name, list(TOOL_REGISTRY.keys())
                 )
                 logger.info("Initialized Gemini autonomous ReAct agent with default model %s", self.model_name)
             except Exception as e:
@@ -137,8 +177,9 @@ class AgentRunner:
         """Execute two-step routed ReAct loop:
         1. Check API key presence.
         2. Classify user intent via IntentRouter (gemini-3.1-flash-lite).
-        3. Route to target model & iteration budget (0, 1, 3, or 6 steps).
-        4. Synthesize grounded final answer.
+        3. Route to target model & discrete tool configuration.
+        4. Dynamically inject lakehouse Context Envelope.
+        5. Synthesize grounded final answer.
         """
         start_time = time.time()
 
@@ -197,13 +238,24 @@ class AgentRunner:
 
         base_llm, routed_llm_with_tools = self._get_or_create_llm(target_model, allowed_tool_names)
 
+        # Dynamic Lakehouse Context Envelope: Inject global temporal bounds into system context
+        min_date, max_date = duckdb_tool.get_temporal_bounds()
+        context_envelope = ""
+        if min_date and max_date:
+            context_envelope = (
+                f"\n\n### CURRENT LAKEHOUSE RUNTIME CONTEXT:\n"
+                f"- Recorded Date Range: {min_date} to {max_date}\n"
+                f"- Relative temporal expressions (such as 'last month', 'latest month', 'previous quarter', or 'current year') "
+                f"MUST be anchored to this latest recorded period ({max_date})."
+            )
+
         # Multi-turn session memory retrieval
         if session_id and session_id in self.sessions:
             messages: List[Any] = self.sessions[session_id]
             messages.append(HumanMessage(content=request.query))
         else:
             messages = [
-                SystemMessage(content=AGENT_SYSTEM_PROMPT),
+                SystemMessage(content=AGENT_SYSTEM_PROMPT + context_envelope),
                 HumanMessage(content=request.query)
             ]
 
@@ -244,19 +296,10 @@ class AgentRunner:
             )
 
         # -----------------------------------------------------------------
-        # Step 2B: Tool-Calling ReAct Loop (capabilities=1, simple=4, complex=6)
+        # Step 2B: Tool-Calling ReAct Loop (No artificial tool masking lockout)
         # -----------------------------------------------------------------
-        catalog_searched = False
-
         for _ in range(max_iterations):
-            # Dynamic tool masking: once search_data_catalog has been invoked, bind only remaining tools
-            if catalog_searched and "search_data_catalog" in allowed_tool_names:
-                active_tool_names = [t for t in allowed_tool_names if t != "search_data_catalog"]
-                _, active_llm = self._get_or_create_llm(target_model, active_tool_names)
-            else:
-                active_llm = routed_llm_with_tools
-
-            ai_msg = active_llm.invoke(messages)
+            ai_msg = routed_llm_with_tools.invoke(messages)
             messages.append(ai_msg)
 
             # If no tool calls were requested, the model has completed its final answer
@@ -290,19 +333,33 @@ class AgentRunner:
                 thought_text = f"Agent ({target_model}) decided to invoke tool '{tool_name}' with parameters: {tool_args}"
 
                 if tool_name == "search_data_catalog" and "search_data_catalog" in allowed_tool_names:
-                    if catalog_searched:
-                        tool_output = (
-                            "Catalog search has already been performed in a prior step. "
-                            "Do not search the catalog again; proceed directly to execute your SQL query using run_sql_query."
-                        )
-                    else:
-                        tool_output = search_data_catalog.invoke(tool_args)
-                        catalog_searched = True
-
+                    tool_output = search_data_catalog.invoke(tool_args)
                     thought_steps.append(
                         AgentThoughtStep(
                             step_number=step_counter,
                             tool="search_data_catalog",
+                            tool_input=tool_args,
+                            tool_output=tool_output,
+                            thought=thought_text
+                        )
+                    )
+                elif tool_name == "get_table_schema" and "get_table_schema" in allowed_tool_names:
+                    tool_output = get_table_schema.invoke(tool_args)
+                    thought_steps.append(
+                        AgentThoughtStep(
+                            step_number=step_counter,
+                            tool="get_table_schema",
+                            tool_input=tool_args,
+                            tool_output=tool_output,
+                            thought=thought_text
+                        )
+                    )
+                elif tool_name == "get_dimension_values" and "get_dimension_values" in allowed_tool_names:
+                    tool_output = get_dimension_values.invoke(tool_args)
+                    thought_steps.append(
+                        AgentThoughtStep(
+                            step_number=step_counter,
+                            tool="get_dimension_values",
                             tool_input=tool_args,
                             tool_output=tool_output,
                             thought=thought_text
