@@ -74,3 +74,36 @@ def get_table_schema(table_name: str) -> str:
     except Exception as e:
         logger.error("get_table_schema failed: %s", e)
         return f"Error retrieving schema for '{table_name}': {str(e)}"
+
+
+SEMANTIC_ITEM_TYPES = ["explore", "metric", "dimension"]
+
+
+def search_semantic_catalog(query: str, top_k: Optional[int] = None) -> str:
+    """Tool for AI Agent: find the LookML explores, measures and dimensions that fit a question.
+
+    Returns field names in the view.field form the semantic query compiler expects, with the
+    explores each field can be queried in. Hidden fields are never indexed.
+    """
+    try:
+        items: List[CatalogItem] = vector_store.search(
+            query,
+            top_k=top_k if top_k is not None else settings.SEMANTIC_SEARCH_TOP_K,
+            min_similarity=settings.RAG_MIN_SIMILARITY,
+            item_types=SEMANTIC_ITEM_TYPES,
+        )
+        if not items:
+            return f"No explores or fields matched '{query}'. Try describe_explore on the most likely explore."
+
+        lines = []
+        for item in items:
+            if item.item_type == "explore":
+                lines.append(f"[explore] {item.name}: {item.description}")
+                continue
+            kind = "measure" if item.item_type == "metric" else "dimension"
+            where = f" | explores: {', '.join(item.explores)}" if item.explores else ""
+            lines.append(f"[{kind}] {item.view}.{item.name}{where}\n    {item.description}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("Semantic catalog search failed: %s", e)
+        return f"Error searching the semantic catalog: {str(e)}"

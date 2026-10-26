@@ -100,6 +100,7 @@ class VectorStoreManager:
                     "sql_formula": item.sql_formula or "",
                     "table_name": item.table_name or "",
                     "description": item.description,
+                    "explores": ",".join(item.explores),
                 }
                 for item in items
             ]
@@ -119,8 +120,12 @@ class VectorStoreManager:
         query: str,
         top_k: Optional[int] = None,
         min_similarity: Optional[float] = None,
+        item_types: Optional[List[str]] = None,
     ) -> List[CatalogItem]:
-        """Search catalog for matching metrics or dimensions using dynamic relative similarity filtering."""
+        """Search catalog for matching metrics or dimensions using dynamic relative similarity filtering.
+
+        item_types limits the search to some catalog entry types (e.g. explores, metrics, dimensions).
+        """
         effective_top_k = top_k if top_k is not None else settings.RAG_TOP_K
         noise_floor = settings.RAG_MIN_SIMILARITY if min_similarity is None else min_similarity
         rel_ratio = settings.RAG_RELATIVE_CUTOFF_RATIO
@@ -133,10 +138,14 @@ class VectorStoreManager:
 
                 # Query candidate pool
                 cand_limit = min(max(effective_top_k * 2, 10), total_count)
+                query_kwargs: Dict[str, Any] = {}
+                if item_types:
+                    query_kwargs["where"] = {"item_type": {"$in": list(item_types)}}
                 results = self.collection.query(
                     query_texts=[query],
                     n_results=cand_limit,
                     include=["metadatas", "distances"],
+                    **query_kwargs,
                 )
                 metadatas_list = (results or {}).get("metadatas") or [[]]
                 distances_list = (results or {}).get("distances") or [[]]
@@ -162,6 +171,7 @@ class VectorStoreManager:
                                 examples=[],
                                 distance=dist_val,
                                 similarity_score=sim_val,
+                                explores=[e for e in (meta.get("explores") or "").split(",") if e],
                             )
                         )
 
@@ -193,6 +203,8 @@ class VectorStoreManager:
             return []
         scored: List[tuple[float, CatalogItem]] = []
         for item in _MEMORY_STORE.values():
+            if item_types and item.item_type not in item_types:
+                continue
             text = f"{item.name} {item.description} {item.view} {item.item_type}".lower()
             hits = sum(1 for token in tokens if token in text)
             if hits > 0:
@@ -230,6 +242,7 @@ class VectorStoreManager:
                         sql_formula=meta.get("sql_formula") or None,
                         table_name=meta.get("table_name") or None,
                         examples=[],
+                        explores=[e for e in (meta.get("explores") or "").split(",") if e],
                     )
             except Exception:
                 pass
@@ -255,6 +268,7 @@ class VectorStoreManager:
                             sql_formula=meta.get("sql_formula") or None,
                             table_name=meta.get("table_name") or None,
                             examples=[],
+                            explores=[e for e in (meta.get("explores") or "").split(",") if e],
                         )
                     )
                 return items

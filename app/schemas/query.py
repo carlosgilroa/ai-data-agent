@@ -22,7 +22,7 @@ class RouterDecision(BaseModel):
 class AgentThoughtStep(BaseModel):
     """Represents a single reasoning step or tool execution by the AI agent."""
     step_number: int = Field(..., description="Order of step execution")
-    tool: str = Field(..., description="Tool invoked (e.g. search_data_catalog, run_sql_query)")
+    tool: str = Field(..., description="Tool invoked (e.g. search_semantic_catalog, run_semantic_query)")
     tool_input: Dict[str, Any] = Field(default_factory=dict, description="Input arguments passed to tool")
     tool_output: Any = Field(None, description="Output returned by tool")
     thought: Optional[str] = Field(None, description="Internal reasoning leading to this action")
@@ -42,6 +42,10 @@ class QueryResponse(BaseModel):
     model_used: Optional[str] = Field(None, description="Gemini model selected to execute the query")
     answer: str = Field(..., description="Natural language synthesized answer with financial insights")
     sql: Optional[str] = Field(None, description="The SQL query generated and executed against DuckDB")
+    semantic_query: Optional[Dict[str, Any]] = Field(None, description="The LookML semantic query (explore, fields, filters) behind the answer")
+    fields_used: List[Dict[str, Any]] = Field(default_factory=list, description="LookML fields behind the numbers, with their definitions")
+    governed: Optional[bool] = Field(None, description="True when the numbers come from governed LookML metrics, False when from the raw SQL fallback")
+    notes: List[str] = Field(default_factory=list, description="Caveats such as partially covered periods")
     data: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="Raw rows returned by the SQL execution")
     thought_steps: List[AgentThoughtStep] = Field(default_factory=list, description="Traceability log of agent tool calls")
     execution_time_ms: float = Field(default=0.0, description="End-to-end execution time in milliseconds")

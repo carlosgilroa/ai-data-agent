@@ -8,96 +8,121 @@ from app.core.config import settings
 from app.schemas.query import QueryRequest, QueryResponse, AgentThoughtStep
 from app.agent.tools.duckdb_tool import duckdb_tool
 from app.agent.tools.rag_tool import (
-    search_data_catalog as raw_search_catalog,
     get_table_schema as raw_get_table_schema,
+    search_semantic_catalog as raw_search_semantic_catalog,
 )
-from app.agent.prompts import AGENT_SYSTEM_PROMPT
+from app.agent.prompts import AGENT_SYSTEM_PROMPT, RAW_SQL_DISABLED, RAW_SQL_ENABLED
 from app.agent.router import intent_router
+from app.semantic.compiler import SemanticQuery, SemanticQueryError
+from app.semantic.service import semantic_layer
 
 logger = logging.getLogger(__name__)
 
+TOOL_PREVIEW_ROWS = 50
+
 
 # -------------------------------------------------------------------------
-# First-Class LangChain Tools for Autonomous Semantic Agent
+# LangChain tools: the model picks LookML fields, the compiler writes the SQL
 # -------------------------------------------------------------------------
 
 @tool
-def search_data_catalog(query: str) -> str:
-    """Search the LookML semantic catalog for business metrics, calculation formulas,
-    dimension definitions, and explore structures.
-    Best Practice: Use the recommended metric search phrase from the runtime context or a complete
-    analytical phrase (e.g. 'total food spending expenses' or 'monthly savings rate') rather than an isolated keyword.
-    Dense semantic vector search matches best on complete contextual phrases.
+def search_semantic_catalog(query: str) -> str:
+    """Find the LookML explores, measures and dimensions that fit a question.
+    Use a complete analytical phrase (e.g. 'total spend by category', 'savings rate per month').
+    Returns field names as view.field together with the explores they can be queried in.
     """
-    return raw_search_catalog(
-        query,
-        top_k=settings.RAG_TOP_K,
-        min_similarity=settings.RAG_MIN_SIMILARITY,
-    )
+    return raw_search_semantic_catalog(query)
+
+
+@tool
+def describe_explore(explore: str) -> str:
+    """List every visible dimension and measure of a LookML explore with its description."""
+    try:
+        return semantic_layer.describe_explore(explore)
+    except SemanticQueryError as e:
+        return f"Error: {e}"
+
+
+@tool
+def get_field_values(explore: str, field: str, pattern: Optional[str] = None, limit: int = 30) -> str:
+    """List the distinct values of a dimension (e.g. dim_categories.category_name, dim_labels.label_name,
+    fct_transactions.merchant) in an explore. Give a pattern (e.g. 'transport') to search for a value.
+    Use it to get the exact spelling before filtering.
+    """
+    try:
+        values = semantic_layer.field_values(explore, field, pattern=pattern, limit=max(1, min(limit, 100)))
+        if not values:
+            return f"No values found for {field}" + (f" matching '{pattern}'." if pattern else ".")
+        return json.dumps({"field": field, "count": len(values), "values": values}, default=str)
+    except SemanticQueryError as e:
+        return f"Error: {e}"
+
+
+@tool
+def run_semantic_query(
+    explore: str,
+    fields: List[str],
+    filters: Optional[Dict[str, str]] = None,
+    sorts: Optional[List[str]] = None,
+    limit: int = 500,
+) -> str:
+    """Run a query against the LookML semantic layer. The compiler writes the SQL from the official
+    LookML definitions, so metrics are always computed the governed way.
+    explore: explore name, e.g. 'fct_transactions'.
+    fields: dimensions and measures as view.field, e.g. ['dim_categories.category_group', 'fct_transactions.total_spend_cop'].
+    filters: map of view.field to a filter expression, e.g. {'fct_transactions.transaction_month': 'last month'}.
+    sorts: e.g. ['fct_transactions.total_spend_cop desc']. limit: maximum rows.
+    """
+    try:
+        result = semantic_layer.run(
+            SemanticQuery(explore=explore, fields=fields, filters=filters or {}, sorts=sorts or [], limit=limit)
+        )
+    except (SemanticQueryError, ValueError) as e:
+        return f"Error: {e}"
+    return _semantic_tool_output(result)
 
 
 @tool
 def get_table_schema(table_name: str) -> str:
-    """Retrieve detailed schema for a specific lakehouse table or LookML derived table (PDT),
-    including row grain, primary key, row count stats, date coverage, and column names with data types.
-    Use this when you know the table name and need its exact structure.
-    """
+    """Fallback only: column names and types of a raw lakehouse table, for read-only SQL when no explore fits."""
     return raw_get_table_schema(table_name)
 
 
 @tool
-def get_dimension_values(
-    table_name: str,
-    column_name: str,
-    pattern: Optional[str] = None,
-    limit: int = 20,
-) -> str:
-    """Retrieve distinct or sample values for a categorical column (e.g. category_name,
-    category_group, merchant, account_name, currency) from a specific table.
-    Always provide a search pattern (e.g. pattern='transport' or pattern='uber') when looking for a specific
-    category, merchant, or account to immediately pinpoint valid strings in one call.
-    """
-    try:
-        values = duckdb_tool.get_dimension_values(table_name, column_name, pattern=pattern, limit=limit)
-        if not values:
-            pat_msg = f" matching '{pattern}'" if pattern else ""
-            return f"No values found for column '{column_name}' in table '{table_name}'{pat_msg}."
-        return json.dumps({
-            "table": table_name,
-            "column": column_name,
-            "count": len(values),
-            "values": values,
-        }, default=str)
-    except Exception as e:
-        return f"Error retrieving dimension values: {str(e)}"
-
-
-@tool
 def run_sql_query(sql: str) -> str:
-    """Execute a read-only SQL query against the analytical lakehouse database.
-    Returns column names, row count, execution time, and result rows.
+    """Fallback only: run read-only SQL on the raw lakehouse tables when no explore can answer the question.
+    Results are not governed metrics.
     """
     try:
         res = duckdb_tool.run_query(sql)
-        row_count = res.get("row_count", 0)
-        columns = res.get("columns", [])
-        data = res.get("data", [])
-        if row_count == 0:
-            return f"Query executed successfully ({res.get('execution_time_ms', 0)}ms) but returned 0 rows. Columns: {columns}."
         return json.dumps({
-            "columns": columns,
-            "row_count": row_count,
-            "execution_time_ms": res.get("execution_time_ms", 0),
-            "rows": data[:15]
+            "columns": res.get("columns", []),
+            "row_count": res.get("row_count", 0),
+            "rows": res.get("data", [])[:TOOL_PREVIEW_ROWS],
         }, default=str)
     except Exception as e:
         return f"DuckDB Execution Error: {str(e)}"
 
 
+def _semantic_tool_output(result: Dict[str, Any]) -> str:
+    payload: Dict[str, Any] = {
+        "fields": [f"{f['name']}: {f['description']}" for f in result["fields"]],
+        "row_count": result["row_count"],
+        "rows": result["rows"][:TOOL_PREVIEW_ROWS],
+    }
+    if result["row_count"] > TOOL_PREVIEW_ROWS:
+        payload["notice"] = f"Showing the first {TOOL_PREVIEW_ROWS} of {result['row_count']} rows."
+    if result["notes"]:
+        payload["notes"] = result["notes"]
+    return json.dumps(payload, default=str)
+
+
 TOOL_REGISTRY = {
-    "search_data_catalog": search_data_catalog,
+    "search_semantic_catalog": search_semantic_catalog,
+    "describe_explore": describe_explore,
+    "get_field_values": get_field_values,
+    "run_semantic_query": run_semantic_query,
     "get_table_schema": get_table_schema,
-    "get_dimension_values": get_dimension_values,
     "run_sql_query": run_sql_query,
 }
 
@@ -106,10 +131,39 @@ TOOL_REGISTRY = {
 # Autonomous ReAct Agent Runner with Two-Step Intent Routing
 # -------------------------------------------------------------------------
 
+class _AnswerTrace:
+    """What the final answer is based on: the last successful semantic query, or the raw SQL fallback."""
+
+    RAW_SQL_NOTE = "Answered with raw SQL, not with a governed LookML metric."
+
+    def __init__(self):
+        self.sql: Optional[str] = None
+        self.semantic_query: Optional[Dict[str, Any]] = None
+        self.fields: List[Dict[str, Any]] = []
+        self.notes: List[str] = []
+        self.data: List[Dict[str, Any]] = []
+        self.governed: Optional[bool] = None
+
+    def record_semantic(self, query: SemanticQuery, result: Dict[str, Any]) -> None:
+        self.sql = result["sql"]
+        self.semantic_query = query.model_dump()
+        self.fields = result["fields"]
+        self.notes = result["notes"]
+        self.data = result["rows"]
+        self.governed = True
+
+    def record_sql(self, sql: str, rows: List[Dict[str, Any]]) -> None:
+        self.sql = sql
+        self.semantic_query = None
+        self.fields = []
+        self.notes = [self.RAW_SQL_NOTE]
+        self.data = rows
+        self.governed = False
+
+
 class AgentRunner:
-    """Autonomous tool-calling ReAct agent orchestrating two-step intent routing,
-    discrete LookML semantic tools, multi-step LLM reasoning, conversational session memory,
-    and safe DuckDB analytical execution.
+    """Tool-calling agent: intent routing, catalog retrieval, LookML semantic queries compiled to SQL,
+    conversational session memory and a read-only raw SQL fallback.
     """
 
     def __init__(self):
@@ -181,10 +235,11 @@ class AgentRunner:
         user_query: str,
         assistant_answer: str,
         last_sql: Optional[str] = None,
+        last_semantic_query: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Persist clean conversational dialogue turns (HumanMessage, AIMessage) to session memory.
 
-        Includes the executed SQL query in the assistant turn for semantic continuity,
+        Includes the semantic query (or the raw SQL) in the assistant turn for continuity,
         without preserving raw intermediate ToolMessages that cause Gemini turn-validation
         errors (400 INVALID_ARGUMENT).
         """
@@ -192,7 +247,10 @@ class AgentRunner:
             return
 
         assistant_content = assistant_answer
-        if last_sql and "```sql" not in assistant_content:
+        if last_semantic_query:
+            # Lets a follow-up ("and in August?") reuse the previous query and change one part
+            assistant_content += f"\n\nSemantic query used: {json.dumps(last_semantic_query)}"
+        elif last_sql and "```sql" not in assistant_content:
             assistant_content += f"\n\n```sql\n-- Executed Lakehouse Query\n{last_sql}\n```"
 
         history = self.sessions.get(session_id, [])
@@ -206,13 +264,32 @@ class AgentRunner:
 
         self.sessions[session_id] = history
 
+    def _system_prompt(self, decision, query: str) -> str:
+        """Base prompt + explores, plus runtime context: dates, data coverage and catalog search results."""
+        prompt = AGENT_SYSTEM_PROMPT.format(
+            explores=semantic_layer.explore_overview(),
+            raw_sql_rule=RAW_SQL_ENABLED if settings.ALLOW_RAW_SQL_FALLBACK else RAW_SQL_DISABLED,
+        )
+        first, last = duckdb_tool.get_data_coverage()
+        context = f"\n### Runtime context\n- Today is {settings.today().isoformat()}."
+        if first and last:
+            context += f"\n- The data covers {first.isoformat()} to {last.isoformat()}."
+
+        # Retrieval feeds the compiler: the router's search phrase pulls the relevant fields up front,
+        # so a simple question usually needs a single run_semantic_query call.
+        search_phrase = decision.metric_search_phrase or query
+        if decision.entity_keywords:
+            search_phrase += " " + " ".join(decision.entity_keywords)
+        catalog_hits = raw_search_semantic_catalog(search_phrase)
+        context += f"\n\n### Catalog search results for this question\n{catalog_hits}"
+        return prompt + context
+
     def run_query(self, request: QueryRequest) -> QueryResponse:
-        """Execute two-step routed ReAct loop:
-        1. Check API key presence.
-        2. Classify user intent & extract semantic query decomposition via IntentRouter (gemini-3.1-flash-lite).
-        3. Route to target model & discrete tool configuration.
-        4. Dynamically inject lakehouse Context Envelope with semantic guidance.
-        5. Synthesize grounded final answer.
+        """Route the question, let the model pick LookML fields, compile and run them, and synthesize an answer:
+        1. Check the API key and reload the semantic model if the LookML changed.
+        2. Classify intent and pick model, step budget and tools (IntentRouter).
+        3. Retrieve relevant explores and fields from the catalog into the prompt.
+        4. Tool-calling loop: run_semantic_query (or the raw SQL fallback) until the model answers.
         """
         start_time = time.time()
 
@@ -232,15 +309,16 @@ class AgentRunner:
                 "Please verify your GEMINI_API_KEY and network connectivity."
             )
 
+        semantic_layer.ensure_fresh()
+
         thought_steps: List[AgentThoughtStep] = []
-        last_sql_executed: Optional[str] = None
-        last_sql_data: List[Dict[str, Any]] = []
+        trace = _AnswerTrace()
 
         session_id = request.session_id.strip() if (request.session_id and request.session_id.strip()) else None
         has_session_context = bool(session_id and session_id in self.sessions)
 
         # -----------------------------------------------------------------
-        # Step 1: Two-Step Intent Router Classification & Semantic Decomposition
+        # Step 1: Intent routing
         # -----------------------------------------------------------------
         decision = intent_router.classify(request.query, has_session_context=has_session_context)
         target_model, max_iterations, allowed_tool_names = intent_router.get_route_config(decision.intent)
@@ -265,41 +343,13 @@ class AgentRunner:
                 },
                 thought=(
                     f"Router ({settings.GEMINI_ROUTER_MODEL}) classified intent as '{decision.intent}' "
-                    f"({decision.reasoning}) -> routed to '{target_model}' with max_iterations={max_iterations}. "
-                    f"Metric query hint: '{decision.metric_search_phrase}', Entities: {decision.entity_keywords}"
+                    f"({decision.reasoning}) -> routed to '{target_model}' with max_iterations={max_iterations}."
                 ),
             )
         )
         step_counter += 1
 
         base_llm, routed_llm_with_tools = self._get_or_create_llm(target_model, allowed_tool_names)
-
-        # Dynamic Lakehouse Context Envelope: Inject global temporal bounds & semantic query guidance
-        min_date, max_date = duckdb_tool.get_temporal_bounds()
-        context_envelope = ""
-        if min_date and max_date:
-            context_envelope = (
-                f"\n\n### CURRENT LAKEHOUSE RUNTIME CONTEXT:\n"
-                f"- Recorded Date Range: {min_date} to {max_date}\n"
-                f"- Relative temporal expressions (such as 'last month', 'latest month', 'previous quarter', or 'current year') "
-                f"MUST be anchored to this latest recorded period ({max_date})."
-            )
-
-        if decision.metric_search_phrase or decision.entity_keywords:
-            context_envelope += (
-                f"\n\n### SEMANTIC QUERY DECOMPOSITION (GUIDANCE):\n"
-                f"- Recommended Catalog Metric Search: '{decision.metric_search_phrase or request.query}'\n"
-                f"- Identified Domain Entities: {decision.entity_keywords}\n"
-                f"Always invoke search_data_catalog first with the recommended metric search phrase to discover the relevant table and metrics before calling get_dimension_values. Only query dimension values on tables confirmed to exist in the catalog."
-            )
-
-        # Multi-turn session memory retrieval:
-        # Reconstruct clean dialogue sequence starting with fresh SystemMessage (with runtime context & router guidance),
-        # followed by prior conversational turns (HumanMessage, AIMessage), followed by current user HumanMessage.
-        messages: List[Any] = [SystemMessage(content=AGENT_SYSTEM_PROMPT + context_envelope)]
-        if session_id and session_id in self.sessions:
-            messages.extend(self.sessions[session_id])
-        messages.append(HumanMessage(content=request.query))
 
         # -----------------------------------------------------------------
         # Step 2A: Out-of-Scope Handling (0 tool steps, separate LLM call)
@@ -318,147 +368,50 @@ class AgentRunner:
             ]
             ai_msg = base_llm.invoke(oos_messages)
             answer = self._extract_text(ai_msg.content)
+            self._save_session_turn(session_id, request.query, answer)
+            return self._response(request, decision.intent, target_model, answer, trace, thought_steps, start_time)
 
-            self._save_session_turn(session_id, request.query, answer, last_sql=None)
-
-            duration_ms = round((time.time() - start_time) * 1000, 2)
-            return QueryResponse(
-                query=request.query,
-                intent=decision.intent,
-                model_used=target_model,
-                answer=answer,
-                sql=None,
-                data=[],
-                thought_steps=thought_steps if request.explain else [],
-                execution_time_ms=duration_ms,
-            )
+        messages: List[Any] = [SystemMessage(content=self._system_prompt(decision, request.query))]
+        if session_id and session_id in self.sessions:
+            messages.extend(self.sessions[session_id])
+        messages.append(HumanMessage(content=request.query))
 
         # -----------------------------------------------------------------
-        # Step 2B: Tool-Calling ReAct Loop (No artificial tool masking lockout)
+        # Step 2B: Tool-calling loop
         # -----------------------------------------------------------------
         for _ in range(max_iterations):
             ai_msg = routed_llm_with_tools.invoke(messages)
             messages.append(ai_msg)
 
-            # If no tool calls were requested, the model has completed its final answer
             if not ai_msg.tool_calls:
                 answer = self._extract_text(ai_msg.content)
+                self._save_session_turn(session_id, request.query, answer, trace.sql, trace.semantic_query)
+                return self._response(request, decision.intent, target_model, answer, trace, thought_steps, start_time)
 
-                self._save_session_turn(session_id, request.query, answer, last_sql=last_sql_executed)
-
-                duration_ms = round((time.time() - start_time) * 1000, 2)
-                return QueryResponse(
-                    query=request.query,
-                    intent=decision.intent,
-                    model_used=target_model,
-                    answer=answer,
-                    sql=last_sql_executed,
-                    data=last_sql_data if request.explain else [],
-                    thought_steps=thought_steps if request.explain else [],
-                    execution_time_ms=duration_ms
-                )
-
-            # Process each autonomous tool invocation
             for tc in ai_msg.tool_calls:
                 tool_name = tc.get("name")
                 tool_args = tc.get("args") or {}
-                tool_id = tc.get("id")
-
-                thought_text = f"Agent ({target_model}) decided to invoke tool '{tool_name}' with parameters: {tool_args}"
-
-                if tool_name == "search_data_catalog" and "search_data_catalog" in allowed_tool_names:
-                    tool_output = search_data_catalog.invoke(tool_args)
-                    thought_steps.append(
-                        AgentThoughtStep(
-                            step_number=step_counter,
-                            tool="search_data_catalog",
-                            tool_input=tool_args,
-                            tool_output=tool_output,
-                            thought=thought_text
-                        )
+                tool_output = self._run_tool(tool_name, tool_args, allowed_tool_names, decision.intent, trace)
+                thought_steps.append(
+                    AgentThoughtStep(
+                        step_number=step_counter,
+                        tool=tool_name or "unknown",
+                        tool_input=tool_args,
+                        tool_output=tool_output,
+                        thought=f"Agent ({target_model}) invoked '{tool_name}' with parameters: {tool_args}",
                     )
-                elif tool_name == "get_table_schema" and "get_table_schema" in allowed_tool_names:
-                    tool_output = get_table_schema.invoke(tool_args)
-                    thought_steps.append(
-                        AgentThoughtStep(
-                            step_number=step_counter,
-                            tool="get_table_schema",
-                            tool_input=tool_args,
-                            tool_output=tool_output,
-                            thought=thought_text
-                        )
-                    )
-                elif tool_name == "get_dimension_values" and "get_dimension_values" in allowed_tool_names:
-                    tool_output = get_dimension_values.invoke(tool_args)
-                    thought_steps.append(
-                        AgentThoughtStep(
-                            step_number=step_counter,
-                            tool="get_dimension_values",
-                            tool_input=tool_args,
-                            tool_output=tool_output,
-                            thought=thought_text
-                        )
-                    )
-                elif tool_name == "run_sql_query" and "run_sql_query" in allowed_tool_names:
-                    sql_arg = tool_args.get("sql", "")
-                    try:
-                        sql_res = duckdb_tool.run_query(sql_arg)
-                        last_sql_executed = sql_arg
-                        last_sql_data = sql_res.get("data", [])
-                        total_rows = sql_res.get("row_count", 0)
-                        preview_limit = 15
-                        preview_rows = min(total_rows, preview_limit)
-
-                        payload = {
-                            "columns": sql_res.get("columns", []),
-                            "total_rows_returned": total_rows,
-                            "preview_rows": preview_rows,
-                            "execution_time_ms": sql_res.get("execution_time_ms", 0),
-                            "rows": last_sql_data[:preview_limit],
-                        }
-                        if total_rows > preview_limit:
-                            payload["notice"] = (
-                                f"Query returned {total_rows} total rows. Showing first {preview_limit} preview rows. "
-                                "For complete category totals or summaries, execute an aggregated SQL query (GROUP BY and SUM/COUNT)."
-                            )
-                        tool_output = json.dumps(payload, default=str)
-                    except Exception as e:
-                        if last_sql_executed is None:
-                            last_sql_executed = sql_arg
-                        tool_output = f"DuckDB Execution Error: {str(e)}"
-
-                    thought_steps.append(
-                        AgentThoughtStep(
-                            step_number=step_counter,
-                            tool="run_sql_query",
-                            tool_input=tool_args,
-                            tool_output=tool_output,
-                            thought=thought_text
-                        )
-                    )
-                else:
-                    tool_output = f"Error: Tool '{tool_name}' is not permitted for intent '{decision.intent}'."
-                    thought_steps.append(
-                        AgentThoughtStep(
-                            step_number=step_counter,
-                            tool=tool_name or "unknown",
-                            tool_input=tool_args,
-                            tool_output=tool_output,
-                            thought=f"Attempted disallowed or unknown tool '{tool_name}'"
-                        )
-                    )
-
+                )
                 step_counter += 1
-                messages.append(ToolMessage(content=str(tool_output), tool_call_id=tool_id))
+                messages.append(ToolMessage(content=str(tool_output), tool_call_id=tc.get("id")))
 
-        # If max iterations reached, invoke LLM with tool_choice='none' (preserving tool declarations for Gemini history) to force synthesis
+        # Step budget exhausted: force a final answer from what was retrieved
         try:
             messages.append(
                 HumanMessage(
                     content=(
-                        "Please synthesize your final analytical answer now based strictly on the query results retrieved above. "
-                        "Do not call any more tools. If no metric calculation query was executed, state your preliminary findings "
-                        "and identified tables, but state clearly that the final answer was not achieved. Never fabricate numbers."
+                        "Please synthesize your final answer now based strictly on the tool results above. "
+                        "Do not call any more tools. If no query returned the numbers needed, say clearly that "
+                        "the answer was not found. Never fabricate numbers."
                     )
                 )
             )
@@ -468,34 +421,64 @@ class AgentRunner:
                 if tools_to_bind
                 else base_llm
             )
-            final_msg = synthesis_llm.invoke(messages)
-            final_answer = self._extract_text(final_msg.content)
-            if not final_answer:
-                final_msg_fallback = routed_llm_with_tools.invoke(messages)
-                final_answer = self._extract_text(final_msg_fallback.content)
+            final_answer = self._extract_text(synthesis_llm.invoke(messages).content)
         except Exception:
-            final_answer = f"Agent reached reasoning iteration limit ({max_iterations}). Last SQL executed: {last_sql_executed}"
+            final_answer = ""
 
-        if not final_answer or not final_answer.strip():
-            if last_sql_executed and last_sql_data:
-                final_answer = f"Executed query `{last_sql_executed}` and retrieved {len(last_sql_data)} rows."
-            elif last_sql_executed:
-                final_answer = f"Agent reached reasoning iteration limit ({max_iterations}). Last SQL executed: `{last_sql_executed}`."
-            else:
-                final_answer = f"Agent reached reasoning iteration limit ({max_iterations}) during catalog exploration. Please retry or formulate a direct inquiry."
+        if not final_answer:
+            final_answer = (
+                f"I couldn't finish the analysis within {max_iterations} steps. "
+                "Please try asking a narrower question."
+            )
 
-        self._save_session_turn(session_id, request.query, final_answer, last_sql=last_sql_executed)
+        self._save_session_turn(session_id, request.query, final_answer, trace.sql, trace.semantic_query)
+        return self._response(request, decision.intent, target_model, final_answer, trace, thought_steps, start_time)
 
-        duration_ms = round((time.time() - start_time) * 1000, 2)
+    @staticmethod
+    def _run_tool(name: str, args: Dict[str, Any], allowed: List[str], intent: str, trace: "_AnswerTrace") -> str:
+        """Execute one tool call and record what an answer would be based on."""
+        if name not in allowed or name not in TOOL_REGISTRY:
+            return f"Error: Tool '{name}' is not permitted for intent '{intent}'."
+
+        if name == "run_semantic_query":
+            try:
+                query = SemanticQuery(
+                    explore=args.get("explore", ""),
+                    fields=args.get("fields") or [],
+                    filters=args.get("filters") or {},
+                    sorts=args.get("sorts") or [],
+                    limit=args.get("limit") or 500,
+                )
+                result = semantic_layer.run(query)
+            except (SemanticQueryError, ValueError) as e:
+                return f"Error: {e}"
+            trace.record_semantic(query, result)
+            return _semantic_tool_output(result)
+
+        if name == "run_sql_query":
+            sql = args.get("sql", "")
+            output = run_sql_query.invoke(args)
+            if not output.startswith("DuckDB Execution Error"):
+                trace.record_sql(sql, json.loads(output).get("rows", []))
+            return output
+
+        return TOOL_REGISTRY[name].invoke(args)
+
+    @staticmethod
+    def _response(request, intent, model, answer, trace: "_AnswerTrace", steps, start_time) -> QueryResponse:
         return QueryResponse(
             query=request.query,
-            intent=decision.intent,
-            model_used=target_model,
-            answer=final_answer,
-            sql=last_sql_executed,
-            data=last_sql_data if request.explain else [],
-            thought_steps=thought_steps if request.explain else [],
-            execution_time_ms=duration_ms
+            intent=intent,
+            model_used=model,
+            answer=answer,
+            sql=trace.sql,
+            semantic_query=trace.semantic_query,
+            fields_used=trace.fields,
+            governed=trace.governed,
+            notes=trace.notes,
+            data=trace.data if request.explain else [],
+            thought_steps=steps if request.explain else [],
+            execution_time_ms=round((time.time() - start_time) * 1000, 2),
         )
 
     def clear_session(self, session_id: str) -> bool:

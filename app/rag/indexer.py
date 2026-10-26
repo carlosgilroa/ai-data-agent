@@ -112,6 +112,11 @@ class SemanticCatalogIndexer:
         """Parse .view.lkml and .model.lkml files to extract measures, dimensions, dimension_groups, explores, and joins."""
         items: List[CatalogItem] = []
         import lkml
+        from app.semantic.service import semantic_layer
+
+        # Explores each view can be queried in, so the agent knows where a field is available
+        model = semantic_layer.model
+        explores_by_view = {view_name: model.explores_for_view(view_name) for view_name in model.views}
 
         # 1. Parse LookML Views (Dimensions, Dimension Groups & Measures)
         views_dir = self.lookml_dir / "views"
@@ -164,8 +169,13 @@ class SemanticCatalogIndexer:
                                 )
                             )
 
-                        # Standard Dimensions (including CASE dimensions)
+                        view_explores = explores_by_view.get(view_name, [])
+
+                        # Standard Dimensions (including CASE dimensions). Hidden fields are left out:
+                        # the semantic layer hides them on purpose (stale copies, keys).
                         for dim in view.get("dimensions", []):
+                            if str(dim.get("hidden", "no")).lower() == "yes":
+                                continue
                             dim_name = dim.get("name", "")
                             dim_sql = self._format_dimension_sql(dim)
                             items.append(
@@ -180,7 +190,8 @@ class SemanticCatalogIndexer:
                                     examples=[
                                         f"Filter or group by {dim_name}",
                                         f"Break down metrics by {dim_name}"
-                                    ]
+                                    ],
+                                    explores=view_explores,
                                 )
                             )
 
@@ -189,7 +200,8 @@ class SemanticCatalogIndexer:
                             dg_name = dgroup.get("name", "")
                             timeframes = dgroup.get("timeframes", [])
                             dg_sql = dgroup.get("sql", f"${{TABLE}}.{dg_name}")
-                            tf_note = f" [Timeframes: {', '.join(timeframes)}]" if timeframes else ""
+                            tf_fields = [f"{view_name}.{dg_name}_{tf}" for tf in timeframes]
+                            tf_note = f" [Fields: {', '.join(tf_fields)}]" if timeframes else ""
                             dg_desc = dgroup.get("description", f"Time dimension group {dg_name} in {view_name}") + tf_note
                             items.append(
                                 CatalogItem(
@@ -203,12 +215,15 @@ class SemanticCatalogIndexer:
                                     examples=[
                                         f"Filter or group by {dg_name} date/month/year",
                                         f"Trend metrics over {dg_name}"
-                                    ]
+                                    ],
+                                    explores=view_explores,
                                 )
                             )
 
                         # Measures
                         for measure in view.get("measures", []):
+                            if str(measure.get("hidden", "no")).lower() == "yes":
+                                continue
                             m_name = measure.get("name", "")
                             desc = measure.get("description", f"Measure {m_name} in {view_name}")
                             filter_strs = self._extract_measure_filters(measure)
@@ -228,7 +243,8 @@ class SemanticCatalogIndexer:
                                     examples=[
                                         f"Calculate {m_name}",
                                         f"What is the {m_name}?"
-                                    ]
+                                    ],
+                                    explores=view_explores,
                                 )
                             )
                 except Exception as e:
@@ -316,14 +332,14 @@ class SemanticCatalogIndexer:
                 cols = [f"{row[0]} ({row[1]})" for row in res]
 
                 # Dynamic statistics: row count & date coverage
-                total_rows = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+                total_rows = conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchall()[0][0]
 
                 date_info = ""
                 if "year_month" in col_names:
                     try:
                         min_ym, max_ym = conn.execute(
                             f"SELECT MIN(year_month), MAX(year_month) FROM {table_name}"
-                        ).fetchone()
+                        ).fetchall()[0]
                         if min_ym and max_ym:
                             date_info = f"Date Coverage: {min_ym} to {max_ym}"
                     except Exception:
@@ -332,7 +348,7 @@ class SemanticCatalogIndexer:
                     try:
                         min_dt, max_dt = conn.execute(
                             f"SELECT MIN(date), MAX(date) FROM {table_name}"
-                        ).fetchone()
+                        ).fetchall()[0]
                         if min_dt and max_dt:
                             date_info = f"Date Coverage: {min_dt} to {max_dt}"
                     except Exception:
@@ -402,3 +418,13 @@ class SemanticCatalogIndexer:
 
 
 indexer = SemanticCatalogIndexer()
+
+
+def _reindex_after_lookml_change() -> None:
+    indexer.run_indexing()
+
+
+# Rebuild the catalog whenever the semantic layer notices the LookML changed on disk
+from app.semantic.service import semantic_layer  # noqa: E402
+
+semantic_layer.on_reload(_reindex_after_lookml_change)

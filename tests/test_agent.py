@@ -3,9 +3,11 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.agent.runner import (
     agent_runner,
-    search_data_catalog,
+    search_semantic_catalog,
+    describe_explore,
+    get_field_values,
+    run_semantic_query,
     get_table_schema,
-    get_dimension_values,
     run_sql_query,
     TOOL_REGISTRY,
 )
@@ -24,32 +26,51 @@ def setup_catalog():
 
 
 def test_agent_tools_execution():
-    """Verify all 4 first-class LangChain tools execute and return valid string outputs."""
-    # 1. Test catalog search tool (decoupled metrics & dimensions)
-    cat_res = search_data_catalog.invoke({"query": "spend"})
-    assert isinstance(cat_res, str)
-    assert len(cat_res) > 0
+    """Verify the semantic tools and the raw SQL fallback execute and return string outputs."""
+    import json
 
-    # 2. Test schema retrieval tool
-    schema_res = get_table_schema.invoke({"table_name": "mart_expense_summary"})
-    assert isinstance(schema_res, str)
-    assert "[Table Schema: mart_expense_summary]" in schema_res
-    assert "Available columns" in schema_res
+    # 1. Catalog search returns view.field names with the explores they live in
+    cat_res = search_semantic_catalog.invoke({"query": "total spend net of refunds"})
+    assert "total_spend_cop" in cat_res
+    assert "explores:" in cat_res
 
-    # 3. Test dimension values tool
-    dim_res = get_dimension_values.invoke({
-        "table_name": "mart_expense_summary",
-        "column_name": "category_name",
+    # 2. Explore description lists visible fields only
+    desc = describe_explore.invoke({"explore": "fct_transactions"})
+    assert "fct_transactions.total_spend_cop" in desc
+    assert "dim_categories.category_name" in desc
+    assert "fct_transactions.category_name " not in desc  # hidden stale ledger copy
+
+    # 3. Field values come through the compiler
+    values = json.loads(get_field_values.invoke({
+        "explore": "fct_transactions",
+        "field": "dim_categories.category_name",
         "pattern": "transport",
-    })
-    assert isinstance(dim_res, str)
-    assert "Public transport" in dim_res or "values" in dim_res
+    }))
+    assert "Public transport" in values["values"]
 
-    # 4. Test SQL execution tool (pure Python DuckDB without pandas)
+    # 4. Semantic query: the compiler writes the SQL
+    res = json.loads(run_semantic_query.invoke({
+        "explore": "mart_monthly_pnl",
+        "fields": ["mart_monthly_pnl.year_month", "mart_monthly_pnl.total_spend_cop"],
+        "limit": 3,
+    }))
+    assert res["row_count"] == 3
+    assert "mart_monthly_pnl.total_spend_cop" in res["rows"][0]
+
+    # 5. Raw SQL fallback still works, read-only
     sql_res = run_sql_query.invoke({"sql": "SELECT 1 AS test_col, 'abc' AS label"})
-    assert isinstance(sql_res, str)
     assert "test_col" in sql_res
     assert "abc" in sql_res
+
+
+def test_semantic_tool_errors_are_returned_to_the_model():
+    """Unknown or hidden fields come back as a readable error with suggestions, not an exception."""
+    out = run_semantic_query.invoke({
+        "explore": "fct_transactions",
+        "fields": ["fct_transactions.total_spend_usd"],
+    })
+    assert out.startswith("Error:")
+    assert "fct_transactions.total_spend_cop" in out
 
 
 def test_agent_unconfigured_api_key_raises_error():
@@ -116,10 +137,11 @@ def test_session_clear_endpoint():
 
 
 def test_intent_router_route_config():
-    """Verify two-step IntentRouter maps each intent to the expected model, step budget, and tools."""
+    """Verify IntentRouter maps each intent to the expected model, step budget, and tools."""
     from app.agent.router import intent_router
 
-    all_tools = ["search_data_catalog", "get_table_schema", "get_dimension_values", "run_sql_query"]
+    semantic_tools = ["search_semantic_catalog", "describe_explore", "get_field_values", "run_semantic_query"]
+    fallback_tools = ["get_table_schema", "run_sql_query"]
 
     m_oos, steps_oos, tools_oos = intent_router.get_route_config("out_of_scope")
     assert m_oos == settings.GEMINI_ROUTER_MODEL
@@ -129,25 +151,32 @@ def test_intent_router_route_config():
     m_cap, steps_cap, tools_cap = intent_router.get_route_config("capabilities")
     assert m_cap == settings.GEMINI_ROUTER_MODEL
     assert steps_cap == 2
-    assert tools_cap == ["search_data_catalog", "get_table_schema"]
+    assert tools_cap == ["search_semantic_catalog", "describe_explore"]
 
     m_sim, steps_sim, tools_sim = intent_router.get_route_config("simple_query")
     assert m_sim == settings.GEMINI_SIMPLE_MODEL
-    assert steps_sim == 6
-    assert tools_sim == all_tools
+    assert steps_sim == 5
+    assert tools_sim == semantic_tools + fallback_tools
 
     m_cmp, steps_cmp, tools_cmp = intent_router.get_route_config("complex_query")
     assert m_cmp == settings.GEMINI_MODEL
     assert steps_cmp == 8
-    assert tools_cmp == all_tools
+    assert tools_cmp == semantic_tools + fallback_tools
+
+    original = settings.ALLOW_RAW_SQL_FALLBACK
+    try:
+        settings.ALLOW_RAW_SQL_FALLBACK = False
+        _, _, tools_locked = intent_router.get_route_config("complex_query")
+        assert tools_locked == semantic_tools
+    finally:
+        settings.ALLOW_RAW_SQL_FALLBACK = original
 
 
-def test_search_data_catalog_is_decoupled_from_schemas():
-    """Verify search_data_catalog returns clean semantic items without dumping table schema footers."""
-    res = search_data_catalog.invoke({"query": "monthly expense pnl summary"})
-    assert isinstance(res, str)
-    # Schemas are now decoupled into get_table_schema
+def test_search_semantic_catalog_skips_tables_and_hidden_fields():
+    """Verify the semantic search returns explores and fields, never raw tables or hidden fields."""
+    res = search_semantic_catalog.invoke({"query": "category name of a transaction"})
     assert "[Table Schema:" not in res
+    assert "fct_transactions.category_name\n" not in res
 
 
 def test_get_table_schema_tool():
@@ -164,21 +193,6 @@ def test_get_table_schema_tool():
     assert "[Table Schema: pdt_category_mom_velocity]" in pdt_res
     assert "Stats:" in pdt_res
     assert "Date Coverage:" in pdt_res
-
-
-def test_get_dimension_values_tool():
-    """Verify get_dimension_values returns valid JSON with count and values list."""
-    res = get_dimension_values.invoke({
-        "table_name": "mart_expense_summary",
-        "column_name": "category_name",
-        "pattern": "transport",
-    })
-    import json
-    parsed = json.loads(res)
-    assert parsed["table"] == "mart_expense_summary"
-    assert parsed["column"] == "category_name"
-    assert parsed["count"] > 0
-    assert isinstance(parsed["values"], list)
 
 
 def test_rag_tool_no_match_clean_message():
@@ -284,3 +298,93 @@ def test_get_session_endpoint():
     assert data["dialogue"][1]["content"] == "Response test"
 
     agent_runner.clear_session(test_session)
+
+
+def test_session_memory_keeps_semantic_query_for_follow_ups():
+    """The assistant turn carries the semantic query so a follow-up can reuse and adjust it."""
+    test_session = "test-session-semantic-follow-up"
+    agent_runner.clear_session(test_session)
+    agent_runner._save_session_turn(
+        session_id=test_session,
+        user_query="How much did I spend last month?",
+        assistant_answer="You spent 12,417,134 COP in September.",
+        last_sql="SELECT ...",
+        last_semantic_query={"explore": "mart_monthly_pnl", "fields": ["mart_monthly_pnl.total_spend_cop"]},
+    )
+    content = agent_runner.sessions[test_session][1].content
+    assert "Semantic query used:" in content
+    assert "mart_monthly_pnl.total_spend_cop" in content
+    agent_runner.clear_session(test_session)
+
+
+class _FakeLLM:
+    """Stands in for Gemini: first asks for a semantic query, then answers from its result."""
+
+    def __init__(self, query_args):
+        self.query_args = query_args
+        self.calls = 0
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        self.calls += 1
+        if self.calls == 1:
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": "run_semantic_query", "args": self.query_args, "id": "call-1"}],
+            )
+        tool_result = next(m for m in reversed(messages) if isinstance(m, ToolMessage))
+        return AIMessage(content=f"Answer based on: {tool_result.content[:80]}")
+
+
+def test_agent_loop_with_fake_llm_is_traceable(monkeypatch):
+    """Runs the whole agent loop without Gemini: the response carries the semantic query,
+    the fields used, the compiled SQL and the partial-period note."""
+    from app.agent.router import intent_router
+    from app.schemas.query import RouterDecision
+
+    fake = _FakeLLM({
+        "explore": "fct_transactions",
+        "fields": ["fct_transactions.total_spend_cop"],
+        "filters": {"fct_transactions.transaction_month": "2026-10"},
+    })
+    monkeypatch.setattr(agent_runner, "api_key", "test-key")
+    monkeypatch.setattr(agent_runner, "llm_with_tools", fake)
+    monkeypatch.setattr(agent_runner, "_get_or_create_llm", lambda model, tools: (fake, fake))
+    monkeypatch.setattr(
+        intent_router,
+        "classify",
+        lambda query, has_session_context=False: RouterDecision(
+            intent="simple_query", reasoning="test", metric_search_phrase="total spend"
+        ),
+    )
+
+    res = agent_runner.run_query(QueryRequest(query="How much did I spend in October 2026?"))
+
+    assert res.governed is True
+    assert res.semantic_query["explore"] == "fct_transactions"
+    assert res.fields_used[0]["name"] == "fct_transactions.total_spend_cop"
+    assert "net of refunds" in res.fields_used[0]["description"]
+    assert "tier2_refund_offset" in res.sql
+    assert any("partly covered" in n for n in res.notes)
+    assert res.data and "fct_transactions.total_spend_cop" in res.data[0]
+
+
+def test_raw_sql_fallback_is_marked_ungoverned():
+    """An answer from the raw SQL fallback is flagged as not governed."""
+    from app.agent.runner import AgentRunner, _AnswerTrace
+
+    trace = _AnswerTrace()
+    out = AgentRunner._run_tool(
+        "run_sql_query", {"sql": "SELECT COUNT(*) AS n FROM master_records"},
+        ["run_sql_query"], "complex_query", trace,
+    )
+    assert '"row_count": 1' in out
+    assert trace.governed is False
+    assert trace.notes == [_AnswerTrace.RAW_SQL_NOTE]
+
+    denied = AgentRunner._run_tool("run_sql_query", {"sql": "SELECT 1"}, ["run_semantic_query"], "simple_query", trace)
+    assert "not permitted" in denied

@@ -7,6 +7,9 @@ from app.schemas.query import IntentType, RouterDecision
 
 logger = logging.getLogger(__name__)
 
+SEMANTIC_TOOLS = ["search_semantic_catalog", "describe_explore", "get_field_values", "run_semantic_query"]
+RAW_SQL_TOOLS = ["get_table_schema", "run_sql_query"]
+
 ROUTER_SYSTEM_PROMPT = """You are an Intent Classification & Semantic Query Router for a personal finance and lakehouse analytics AI agent.
 Your responsibility is twofold:
 
@@ -15,10 +18,10 @@ Your responsibility is twofold:
    - "out_of_scope": Questions completely unrelated to personal finance, expenses, income, cashflow, budgets, currencies, accounting, or the data lakehouse.
    - "capabilities": Questions asking what you can do, how you work, what tools or tables you have access to.
    - "simple_query": Direct single-metric lookups, distinct counts, category spend aggregations, or single-table aggregations.
-   - "complex_query": Multi-hop analytical questions, period-over-period comparisons, Tier 1 vs Tier 2 accounting reconciliations, multi-currency FX analysis, budget variance diagnostics.
+   - "complex_query": Multi-hop analytical questions, period-over-period comparisons, Tier 1 vs Tier 2 accounting reconciliations, multi-currency FX analysis, budget variance diagnostics, open-ended exploration of transactions.
 
 2. Semantic Query Decomposition (for analytical queries):
-   - "metric_search_phrase": Construct a natural analytical search phrase combining the metric/calculation intent with domain context suitable for dense vector catalog search (e.g. "total food spending expenses", "monthly savings rate", "net cashflow after refunds", "transportation expenses").
+   - "metric_search_phrase": Construct a natural analytical search phrase combining the metric/calculation intent with domain context, used to retrieve LookML explores and fields from a vector catalog (e.g. "total food spending expenses", "monthly savings rate", "spend by trip label", "category budget over cap").
    - "entity_keywords": Extract domain entities, category keywords, merchants, accounts, or currencies (e.g. ["food"], ["transportation"]).
 """
 
@@ -122,20 +125,17 @@ class IntentRouter:
     @staticmethod
     def get_route_config(intent: IntentType) -> Tuple[str, int, List[str]]:
         """Map classified intent to (target_model_name, max_iterations, allowed_tool_names)."""
-        all_analytical_tools = [
-            "search_data_catalog",
-            "get_table_schema",
-            "get_dimension_values",
-            "run_sql_query",
-        ]
+        analytical_tools = list(SEMANTIC_TOOLS)
+        if settings.ALLOW_RAW_SQL_FALLBACK:
+            analytical_tools += RAW_SQL_TOOLS
         if intent == "out_of_scope":
             return (settings.GEMINI_ROUTER_MODEL, 0, [])
         if intent == "capabilities":
-            return (settings.GEMINI_ROUTER_MODEL, 2, ["search_data_catalog", "get_table_schema"])
+            return (settings.GEMINI_ROUTER_MODEL, 2, ["search_semantic_catalog", "describe_explore"])
         if intent == "simple_query":
-            return (settings.GEMINI_SIMPLE_MODEL, 6, all_analytical_tools)
+            return (settings.GEMINI_SIMPLE_MODEL, 5, analytical_tools)
         # complex_query
-        return (settings.GEMINI_MODEL, 8, all_analytical_tools)
+        return (settings.GEMINI_MODEL, 8, analytical_tools)
 
 
 intent_router = IntentRouter()
