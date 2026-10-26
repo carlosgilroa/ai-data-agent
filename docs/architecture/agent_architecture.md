@@ -129,7 +129,7 @@ Every `QueryResponse` includes:
 - `notes`: caveats such as partly covered periods or the raw-SQL warning;
 - `governed`: `true` for LookML metrics, `false` for the raw SQL fallback;
 - `thought_steps`: the router decision, the retrieval result and every tool call with its input and output;
-- `token_usage`: the Gemini calls and their input/output tokens, in total and per call. Each entry in `token_usage.calls` also has an `input`: the `messages` the model received (role `system`, `user`, `assistant` with its `tool_calls`, or `tool` with its `tool_call_id`), the names of the `tools` it was offered, and for the router the `output_schema` it answered in. `UsageCallback.on_chat_model_start()` in `app/agent/usage.py` records it; tool schemas are left out to keep the response small.
+- `token_usage`: the Gemini calls and their input/output tokens, in total and per call. Each entry in `token_usage.calls` also has an `input`: the `messages` the model received (role `system`, `user`, `assistant` with its `tool_calls`, or `tool` with its `tool_call_id`), the names of the `tools` it was offered, and for the router the `output_schema` it answered in. `UsageCallback.on_chat_model_start()` in `app/agent/usage.py` records it; tool schemas are left out to keep the response small. Gemini keeps no state between calls, so every call is sent its system prompt again; the response stores each distinct prompt once in `token_usage.system_prompts` (keyed `router`, `agent`, ...), and each call's system message is `{"role": "system", "ref": "agent"}`. The rest of each call's messages is listed in full, so you can see the conversation grow turn by turn.
 
 ---
 

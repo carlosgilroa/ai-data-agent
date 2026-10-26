@@ -221,8 +221,9 @@ Example with `AGENT_TODAY=2026-10-26` (SQL and tool outputs shortened):
 | `notes` | Caveats, e.g. "2026-10-01 to 2026-10-31 is only partly covered: the data runs through 2026-10-20." |
 | `sql` | The compiled SQL (or the fallback SQL) |
 | `data` | Rows of the last query behind the answer |
-| `token_usage` | `llm_calls`, `input_tokens`, `output_tokens`, `total_tokens`, and `calls`: one entry per Gemini call with `model`, its token counts and `input` |
-| `token_usage.calls[i].input` | What that call received: `messages` (each with `role` `system`, `user`, `assistant` or `tool` and its `content`; assistant messages add `tool_calls`, tool messages add `tool_call_id`), `tools` (names of the tools offered) and, for the router, `output_schema` (`RouterDecision`) |
+| `token_usage` | `llm_calls`, `input_tokens`, `output_tokens`, `total_tokens`, `system_prompts` and `calls`: one entry per Gemini call with `model`, its token counts and `input` |
+| `token_usage.system_prompts` | Each distinct system prompt once, keyed `router`, `agent` (`agent_2`, ... if a request used another one). Every call is sent its system prompt again; the calls point here instead of repeating it |
+| `token_usage.calls[i].input` | What that call received: `messages` (the system message as `{"role": "system", "ref": "agent"}`, pointing into `system_prompts`; the others with `role` `user`, `assistant` or `tool` and their `content`; assistant messages add `tool_calls`, tool messages add `tool_call_id`), `tools` (names of the tools offered) and, for the router, `output_schema` (`RouterDecision`) |
 
 #### Error Response: Missing LLM Configuration (`400 Bad Request`)
 

@@ -24,13 +24,40 @@ def start_tracking() -> List[Dict[str, Any]]:
 
 
 def summarize(calls: List[Dict[str, Any]]) -> Dict[str, Any]:
-    return {
+    """Totals plus the per-call list. Every call is sent its system prompt again, so each distinct
+    prompt is stored once under `system_prompts` and the calls' system messages point to it by `ref`.
+    """
+    system_prompts: Dict[str, str] = {}
+    compact_calls = []
+    for call in calls:
+        call_input = call.get("input")
+        if not call_input:
+            compact_calls.append(call)
+            continue
+        base = "router" if call_input.get("output_schema") else "agent"
+        messages = []
+        for message in call_input["messages"]:
+            if message.get("role") != "system":
+                messages.append(message)
+                continue
+            ref = next((k for k, text in system_prompts.items() if text == message["content"]), None)
+            if ref is None:
+                ref, n = base, 2
+                while ref in system_prompts:
+                    ref, n = f"{base}_{n}", n + 1
+                system_prompts[ref] = message["content"]
+            messages.append({"role": "system", "ref": ref})
+        compact_calls.append({**call, "input": {**call_input, "messages": messages}})
+    summary: Dict[str, Any] = {
         "llm_calls": len(calls),
         "input_tokens": sum(c["input_tokens"] for c in calls),
         "output_tokens": sum(c["output_tokens"] for c in calls),
         "total_tokens": sum(c["total_tokens"] for c in calls),
-        "calls": calls,
     }
+    if system_prompts:
+        summary["system_prompts"] = system_prompts
+    summary["calls"] = compact_calls
+    return summary
 
 
 def _text(content: Any) -> str:

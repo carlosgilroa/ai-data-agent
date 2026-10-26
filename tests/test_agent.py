@@ -451,7 +451,7 @@ def test_token_usage_records_each_calls_input():
 
     first, second = summarize(calls)["calls"]
     assert first["input"]["messages"] == [
-        {"role": "system", "content": "You are an analyst."},
+        {"role": "system", "ref": "agent"},
         {"role": "user", "content": "How much?"},
     ]
     assert first["input"]["tools"] == []
@@ -472,6 +472,31 @@ def test_token_usage_records_each_calls_input():
         run_id=run_id,
     )
     assert calls[-1]["input"]["output_schema"] == "RouterDecision"
+
+
+def test_token_usage_stores_each_system_prompt_once():
+    """Calls that repeat a system prompt point to one stored copy; a different prompt gets its own key."""
+    from app.agent.usage import summarize
+
+    def call(system, output_schema=None, extra=()):
+        call_input = {"messages": [{"role": "system", "content": system}, {"role": "user", "content": "Q"}, *extra], "tools": []}
+        if output_schema:
+            call_input["output_schema"] = output_schema
+        return {"model": "m", "input_tokens": 1, "output_tokens": 1, "total_tokens": 2, "input": call_input}
+
+    tool_turn = ({"role": "assistant", "content": "", "tool_calls": [{"name": "query", "args": {}}]},)
+    usage = summarize([
+        call("Route it.", output_schema="RouterDecision"),
+        call("Answer it."),
+        call("Answer it.", extra=tool_turn),
+        call("Decline politely."),
+    ])
+    assert usage["system_prompts"] == {"router": "Route it.", "agent": "Answer it.", "agent_2": "Decline politely."}
+    refs = [c["input"]["messages"][0] for c in usage["calls"]]
+    assert refs == [{"role": "system", "ref": r} for r in ["router", "agent", "agent", "agent_2"]]
+    assert usage["calls"][2]["input"]["messages"][2]["tool_calls"][0]["name"] == "query"  # the loop's growth stays visible
+    assert usage["calls"][0]["input"]["output_schema"] == "RouterDecision"
+    assert summarize([])["calls"] == [] and "system_prompts" not in summarize([])
 
 
 def test_field_values_flag_a_cut_off_list():
