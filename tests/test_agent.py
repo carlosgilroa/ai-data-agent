@@ -418,6 +418,50 @@ def test_token_usage_is_tracked_per_request():
     assert [c["model"] for c in usage["calls"]] == ["router", "main"]
 
 
+def test_token_usage_records_each_calls_input():
+    """Each call in token_usage carries the messages it received and the names of the tools offered."""
+    import uuid
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+    from app.agent.usage import UsageCallback, start_tracking, summarize
+
+    usage_metadata = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
+    calls = start_tracking()
+    model = FakeMessagesListChatModel(
+        responses=[AIMessage(content="ok", usage_metadata=usage_metadata)], callbacks=[UsageCallback("fake")]
+    )
+    model.invoke([SystemMessage(content="You are an analyst."), HumanMessage(content="How much?")])
+
+    # A later turn of the tool loop, with the tools offered the way the Gemini integration passes them
+    callback, run_id = UsageCallback("main"), uuid.uuid4()
+    turn = [
+        HumanMessage(content="How much?"),
+        AIMessage(content="", tool_calls=[{"name": "query", "args": {"explore": "e"}, "id": "c1"}]),
+        ToolMessage(content='{"rows": []}', tool_call_id="c1", name="query"),
+    ]
+    callback.on_chat_model_start(
+        {}, [turn], run_id=run_id,
+        invocation_params={"tools": [{"function_declarations": [{"name": "query"}, {"name": "get_explores"}]}]},
+    )
+    callback.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(message=AIMessage(content="done", usage_metadata=usage_metadata))]]),
+        run_id=run_id,
+    )
+
+    first, second = summarize(calls)["calls"]
+    assert first["input"]["messages"] == [
+        {"role": "system", "content": "You are an analyst."},
+        {"role": "user", "content": "How much?"},
+    ]
+    assert first["input"]["tools"] == []
+    assert second["input"]["tools"] == ["query", "get_explores"]
+    assistant, tool_msg = second["input"]["messages"][1:]
+    assert assistant["tool_calls"] == [{"name": "query", "args": {"explore": "e"}}]
+    assert tool_msg == {"role": "tool", "content": '{"rows": []}', "tool_call_id": "c1", "name": "query"}
+    assert not callback._inputs  # nothing left behind once the call ended
+
+
 def test_field_values_flag_a_cut_off_list():
     """A value list longer than the limit says so, so the model searches instead of concluding."""
     from app.semantic.service import semantic_layer

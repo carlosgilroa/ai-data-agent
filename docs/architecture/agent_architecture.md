@@ -129,7 +129,7 @@ Every `QueryResponse` includes:
 - `notes`: caveats such as partly covered periods or the raw-SQL warning;
 - `governed`: `true` for LookML metrics, `false` for the raw SQL fallback;
 - `thought_steps`: the router decision, the retrieval result and every tool call with its input and output;
-- `token_usage`: the Gemini calls and their input/output tokens, in total and per call.
+- `token_usage`: the Gemini calls and their input/output tokens, in total and per call. Each entry in `token_usage.calls` also has an `input`: the `messages` the model received (role `system`, `user`, `assistant` with its `tool_calls`, or `tool` with its `tool_call_id`), the names of the `tools` it was offered, and for the router the `output_schema` it answered in. `UsageCallback.on_chat_model_start()` in `app/agent/usage.py` records it; tool schemas are left out to keep the response small.
 
 ---
 
