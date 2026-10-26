@@ -20,9 +20,14 @@ class DuckDBTool:
     def __init__(self):
         self.conn = duckdb.connect(":memory:")
         self._register_views()
+        self._lock_down()
 
     def _register_views(self):
-        """Register friendly table names pointing directly to parquet data files and LookML derived tables."""
+        """Load the parquet data files into in-memory tables and register LookML derived tables as views.
+
+        The data is loaded into memory (not left as read_parquet views) so that file access
+        can be switched off afterwards; restart the app to pick up new data.
+        """
         import re
 
         tables = [
@@ -40,7 +45,7 @@ class DuckDBTool:
             if path.exists():
                 try:
                     posix_path = path.as_posix()
-                    self.conn.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM read_parquet('{posix_path}')")
+                    self.conn.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM read_parquet('{posix_path}')")
                     registered.append(name)
                 except Exception as e:
                     logger.error("Failed to register view %s for %s: %s", name, path, e)
@@ -69,6 +74,15 @@ class DuckDBTool:
             logger.warning("Could not register LookML derived table views in DuckDB: %s", e)
 
         logger.info("DuckDB initialized with views: %s", registered)
+
+    def _lock_down(self):
+        """Disable file system, network and extension access, then freeze the configuration.
+
+        Without this, a read-only SELECT could still read any file on the machine
+        (e.g. read_text('.env')), because DuckDB table functions access the file system.
+        """
+        self.conn.execute("SET enable_external_access = false")
+        self.conn.execute("SET lock_configuration = true")
 
     def validate_sql(self, sql: str) -> None:
         """Ensure the SQL query is strictly read-only and safe."""

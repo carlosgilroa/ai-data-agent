@@ -351,7 +351,7 @@ class SemanticCatalogIndexer:
                 desc_parts.append(f"Available columns: {', '.join(cols)}")
 
                 full_desc = " | ".join(desc_parts)
-                sql_source = f"read_parquet('{file_path.as_posix()}')" if file_path else f"SELECT * FROM {table_name}"
+                sql_source = f"SELECT * FROM {table_name}"
 
                 items.append(
                     CatalogItem(
