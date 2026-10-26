@@ -92,9 +92,9 @@ class UsageCallback(BaseCallbackHandler):
             "tools": _tool_names(params),
         }
         # Structured output (the router) has no tools, but answers in the shape of a JSON schema
-        structured = params.get("ls_structured_output_format")
-        if isinstance(structured, dict) and isinstance(structured.get("schema"), dict):
-            record["output_schema"] = structured["schema"].get("title") or "JSON schema"
+        schema = params.get("response_json_schema") or params.get("response_schema")
+        if isinstance(schema, dict):
+            record["output_schema"] = schema.get("title") or "JSON schema"
         self._inputs[run_id] = record
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:

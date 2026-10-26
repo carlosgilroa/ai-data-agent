@@ -461,6 +461,18 @@ def test_token_usage_records_each_calls_input():
     assert tool_msg == {"role": "tool", "content": '{"rows": []}', "tool_call_id": "c1", "name": "query"}
     assert not callback._inputs  # nothing left behind once the call ended
 
+    # The router answers in a JSON schema instead of calling tools; its name is recorded
+    router, run_id = UsageCallback("router"), uuid.uuid4()
+    router.on_chat_model_start(
+        {}, [[HumanMessage(content="How much?")]], run_id=run_id,
+        invocation_params={"response_json_schema": {"title": "RouterDecision", "type": "object"}},
+    )
+    router.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(message=AIMessage(content="{}", usage_metadata=usage_metadata))]]),
+        run_id=run_id,
+    )
+    assert calls[-1]["input"]["output_schema"] == "RouterDecision"
+
 
 def test_field_values_flag_a_cut_off_list():
     """A value list longer than the limit says so, so the model searches instead of concluding."""
