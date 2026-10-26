@@ -39,8 +39,9 @@ def test_indexer_execution():
 
     spend_metric = items_by_id.get("fct_transactions.total_spend_cop")
     assert spend_metric is not None
-    assert "SUM(" in (spend_metric.sql_formula or "")
-    assert "is_transfer = no" in spend_metric.description
+    assert "gross_spend_cop" in (spend_metric.sql_formula or "")
+    assert "total_refunds_cop" in (spend_metric.sql_formula or "")
+    assert "excluding transfers" in spend_metric.description
 
     # Confirm dimension_groups and CASE dimensions are extracted
     assert "fct_transactions.transaction" in items_by_id
