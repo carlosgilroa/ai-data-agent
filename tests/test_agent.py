@@ -474,6 +474,32 @@ def test_token_usage_records_each_calls_input():
     assert calls[-1]["input"]["output_schema"] == "RouterDecision"
 
 
+def test_retrieval_trace_carries_similarity_scores():
+    """The retrieval step's trace shows each item's similarity and how each explore's score was built,
+    while the context sent to the model stays free of scores."""
+    from types import SimpleNamespace
+    from app.agent.runner import _format_retrieval
+    from app.agent.tools.rag_tool import retrieve
+
+    r = retrieve("How much did I spend on cabs last month?", measure_phrase="total spend", filter_values=["cabs"])
+    out = r.scored()
+    assert [e["name"] for e in out["explores"]] == r.explores
+    for explore in out["explores"]:
+        parts = explore["parts"]
+        assert set(parts) == {"own", "best_measure", "best_dimension", "filter_bonus"}
+        assert abs(sum(parts.values()) - explore["score"]) < 0.01
+    assert out["explores"] == sorted(out["explores"], key=lambda e: e["score"], reverse=True)
+    assert all(0 < m["score"] <= 1 for m in out["measures"])
+    assert [m["name"] for m in out["measures"]] == [i.id for i in r.measures]
+    for g in out["glossary"]:
+        assert g["match"] in ("keyword", "vector")
+        assert (g["score"] is None) == (g["match"] == "keyword")
+    assert all(g["score"] is not None for g in out["golden_queries"])
+
+    prompt = _format_retrieval(r, SimpleNamespace(time_period="last month"))
+    assert "score" not in prompt.lower()
+
+
 def test_token_usage_stores_each_system_prompt_once():
     """Calls that repeat a system prompt point to one stored copy; a different prompt gets its own key."""
     from app.agent.usage import summarize

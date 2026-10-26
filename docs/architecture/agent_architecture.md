@@ -71,7 +71,7 @@ Retrieval runs in code before the loop and costs no Gemini tokens:
 3. **Filter values are resolved.** Each value the user mentioned is matched against the glossary first ("eating out" means category_name = "Restaurants & fast food"), and otherwise searched in every searchable text dimension (see section 4). The prompt shows the exact values found, e.g. `dim_categories.category_name = 'Restaurants & fast food'`.
 4. **Agent instructions are retrieved.** Glossary entries whose term or synonym appears in the question, plus close vector matches, and the closest golden queries (verified question and query pairs) as examples.
 
-Each explore in the prompt lists its time fields, so the time period becomes a filter without a lookup. The retrieval result is also recorded as a `retrieval` step in `thought_steps`.
+Each explore in the prompt lists its time fields, so the time period becomes a filter without a lookup. The retrieval result is also recorded as a `retrieval` step in `thought_steps`, with similarity scores the prompt doesn't get: each measure, dimension and golden query has its cosine `score`; each glossary entry says whether it matched by `keyword` (no score) or `vector`; and each explore has its combined `score` with the `parts` it was built from (`own` similarity, `best_measure`, half its `best_dimension`, and `filter_bonus` of 0.5 per filter value found in it). Scores are rounded to 3 decimals.
 
 ---
 

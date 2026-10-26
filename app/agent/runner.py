@@ -502,15 +502,12 @@ class AgentRunner:
                     "dimensions": decision.dimensions,
                     "filter_values": decision.filter_values,
                 },
-                tool_output={
-                    "explores": retrieval.explores,
-                    "measures": [i.id for i in retrieval.measures],
-                    "dimensions": [i.id for i in retrieval.dimensions],
-                    "filter_values": retrieval.filter_values,
-                    "glossary": [g.get("term") for g in retrieval.glossary],
-                    "golden_queries": [g["question"] for g in retrieval.golden_queries],
-                },
-                thought="Chroma retrieved explores, fields, glossary and golden queries; filter values were looked up in the data.",
+                tool_output=retrieval.scored(),
+                thought=(
+                    "Chroma retrieved explores, fields, glossary and golden queries (cosine similarity scores; an "
+                    "explore's score is its own similarity + its best measure + half its best dimension + 0.5 per "
+                    "filter value it contains); filter values were looked up in the data."
+                ),
             )
         )
         step_counter += 1

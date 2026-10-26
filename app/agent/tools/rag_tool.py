@@ -94,6 +94,28 @@ class Retrieval:
     golden_queries: List[Dict[str, Any]] = field(default_factory=list)
     # One entry per filter value the router found: {"value", "source", "matches": [{field, values, explores}]}
     filter_values: List[Dict[str, Any]] = field(default_factory=list)
+    # How each explore was ranked: {"score", "parts": {"own", "best_measure", "best_dimension", "filter_bonus"}}
+    explore_scores: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Glossary term -> {"match": "keyword" | "vector", "score"}; keyword matches have no similarity score
+    glossary_scores: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+    def scored(self) -> Dict[str, Any]:
+        """The retrieval result with similarity scores, for the answer's trace (not for the prompt)."""
+        def item(i: CatalogItem) -> Dict[str, Any]:
+            return {"name": i.id, "score": _round(i.similarity_score)}
+
+        return {
+            "explores": [{"name": e, **self.explore_scores.get(e, {})} for e in self.explores],
+            "measures": [item(i) for i in self.measures],
+            "dimensions": [item(i) for i in self.dimensions],
+            "filter_values": self.filter_values,
+            "glossary": [{"term": g.get("term"), **self.glossary_scores.get(g.get("term"), {})} for g in self.glossary],
+            "golden_queries": [{"question": g["question"], "score": g.get("score")} for g in self.golden_queries],
+        }
+
+
+def _round(score: Optional[float]) -> Optional[float]:
+    return round(score, 3) if score is not None else None
 
 
 # Weak matches still help to vote for an explore, but only fields above this floor reach the prompt
@@ -115,7 +137,8 @@ def retrieve(
     5. Each filter value is resolved to the dimensions that contain it (glossary first, then a value
        search in the data), and explores that contain it get a boost.
     """
-    glossary = retrieve_glossary(question)
+    glossary_scores: Dict[str, Dict[str, Any]] = {}
+    glossary = retrieve_glossary(question, scores=glossary_scores)
     resolved = [resolve_filter_value(v, glossary) for v in (filter_values or []) if v.strip()]
     measures = vector_store.search(
         measure_phrase or question, top_k=_FIELD_POOL, min_similarity=settings.RAG_MIN_SIMILARITY, item_types=["metric"]
@@ -135,18 +158,24 @@ def retrieve(
     # half a point for every filter value found in it. Best match, not a sum, so an explore with many
     # look-alike measures doesn't win on volume.
     scores: Dict[str, float] = defaultdict(float)
+    parts: Dict[str, Dict[str, float]] = defaultdict(
+        lambda: {"own": 0.0, "best_measure": 0.0, "best_dimension": 0.0, "filter_bonus": 0.0}
+    )
     for item in explore_hits:
         scores[item.name] += item.similarity_score or 0.0
-    for weight, hits in ((1.0, measures), (0.5, dimensions)):
+        parts[item.name]["own"] = item.similarity_score or 0.0
+    for weight, part, hits in ((1.0, "best_measure", measures), (0.5, "best_dimension", dimensions)):
         best: Dict[str, float] = {}
         for item in hits:
             for explore in item.explores:
                 best[explore] = max(best.get(explore, 0.0), item.similarity_score or 0.0)
         for explore, score in best.items():
             scores[explore] += weight * score
+            parts[explore][part] = weight * score
     for value in resolved:
         for explore in {e for m in value["matches"] for e in m["explores"]}:
             scores[explore] += 0.5
+            parts[explore]["filter_bonus"] += 0.5
     explores = [e for e, _ in sorted(scores.items(), key=lambda kv: kv[1], reverse=True)][: settings.RETRIEVAL_EXPLORES]
     for value in resolved:
         value["matches"] = [m for m in value["matches"] if set(m["explores"]) & set(explores)][:3]
@@ -160,7 +189,7 @@ def retrieve(
         dimensions=within(dimensions, settings.RETRIEVAL_DIMENSIONS),
         glossary=glossary,
         golden_queries=[
-            {"question": item.name, "query": json.loads(item.sql_formula or "{}")}
+            {"question": item.name, "query": json.loads(item.sql_formula or "{}"), "score": _round(item.similarity_score)}
             for item in vector_store.search(
                 question,
                 top_k=settings.RETRIEVAL_GOLDEN_QUERIES,
@@ -169,6 +198,10 @@ def retrieve(
             )
         ],
         filter_values=resolved,
+        explore_scores={
+            e: {"score": _round(scores[e]), "parts": {k: _round(v) for k, v in parts[e].items()}} for e in explores
+        },
+        glossary_scores=glossary_scores,
     )
 
 
@@ -196,21 +229,29 @@ def resolve_filter_value(value: str, glossary: List[Dict[str, Any]]) -> Dict[str
     return {"value": value, "source": "data", "matches": semantic_layer.search_values_everywhere(value, per_field=3)}
 
 
-def retrieve_glossary(text: str) -> List[Dict[str, Any]]:
-    """Hybrid glossary lookup: entries whose term or synonym appears in the text, then close vector matches."""
+def retrieve_glossary(text: str, scores: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """Hybrid glossary lookup: entries whose term or synonym appears in the text, then close vector matches.
+    `scores`, if given, receives how each returned entry matched: {"match": "keyword" | "vector", "score"}.
+    """
     from app.semantic.service import semantic_layer
 
     lowered = text.lower()
     found: Dict[str, Dict[str, Any]] = {}
+    how: Dict[str, Dict[str, Any]] = {}
     for entry in semantic_layer.instructions.glossary:
         words = [entry.term] + entry.synonyms
         if any(re.search(rf"\b{re.escape(w.lower())}\b", lowered) for w in words):
             found[entry.term] = entry.model_dump()
+            how[entry.term] = {"match": "keyword", "score": None}
     for item in vector_store.search(
         text, top_k=settings.RETRIEVAL_GLOSSARY, min_similarity=_INSTRUCTION_MIN_SIMILARITY, item_types=["glossary"]
     ):
         found.setdefault(item.name, json.loads(item.sql_formula or "{}"))
-    return list(found.values())[: settings.RETRIEVAL_GLOSSARY]
+        how.setdefault(item.name, {"match": "vector", "score": _round(item.similarity_score)})
+    kept = list(found.values())[: settings.RETRIEVAL_GLOSSARY]
+    if scores is not None:
+        scores.update({e["term"]: how[e["term"]] for e in kept if e.get("term") in how})
+    return kept
 
 
 def search_semantic_catalog(query: str, top_k: Optional[int] = None) -> str:
