@@ -474,6 +474,32 @@ def test_token_usage_records_each_calls_input():
     assert calls[-1]["input"]["output_schema"] == "RouterDecision"
 
 
+def test_tool_descriptions_are_sent_once():
+    """Gemini gets each tool's description on the function only, not again on its parameters object,
+    while parameter descriptions (the query filter's field and value) are kept."""
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_google_genai._function_utils import convert_to_genai_function_declarations
+    from app.agent.runner import tool_declarations
+    from app.agent.usage import _tool_names
+
+    llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key="test-key")
+    bound = llm.bind_tools(tool_declarations(list(TOOL_REGISTRY)))
+    params = llm._get_invocation_params(**bound.kwargs)
+    # The integration turns the bound tools into Gemini function declarations when it builds the request
+    sent = convert_to_genai_function_declarations(params["tools"])
+    declarations = [d for tool in sent for d in tool.function_declarations]
+
+    assert [d.name for d in declarations] == list(TOOL_REGISTRY)
+    assert _tool_names(params) == list(TOOL_REGISTRY)
+    for d in declarations:
+        assert d.description
+        assert not (d.parameters and d.parameters.description), f"{d.name} repeats its description on its parameters"
+    query_decl = next(d for d in declarations if d.name == "query")
+    filter_item = query_decl.parameters.properties["filters"].items
+    assert "view.field" in filter_item.properties["field"].description
+    assert filter_item.properties["value"].description
+
+
 def test_retrieval_trace_carries_similarity_scores():
     """The retrieval step's trace shows each item's similarity and how each explore's score was built,
     while the context sent to the model stays free of scores."""

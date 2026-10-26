@@ -4,6 +4,7 @@ import json
 from typing import Dict, Any, List, Optional, Tuple
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.tools import tool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import BaseModel, Field as PydanticField
 from app.core.config import settings
 from app.schemas.query import QueryRequest, QueryResponse, AgentThoughtStep
@@ -241,6 +242,15 @@ TOOL_REGISTRY = {
     "run_sql_query": run_sql_query,
 }
 
+# What Gemini is sent for each tool. Bound as OpenAI-style function dicts rather than the tools themselves:
+# converting a tool directly repeats its whole docstring as the description of its parameters object
+# (about 2,000 characters of duplicates per call). Parameter descriptions, such as QueryFilter's, are kept.
+TOOL_DECLARATIONS = {name: convert_to_openai_tool(t) for name, t in TOOL_REGISTRY.items()}
+
+
+def tool_declarations(names: List[str]) -> List[Dict[str, Any]]:
+    return [TOOL_DECLARATIONS[name] for name in names if name in TOOL_DECLARATIONS]
+
 
 # -------------------------------------------------------------------------
 # Autonomous ReAct Agent Runner with Two-Step Intent Routing
@@ -329,7 +339,7 @@ class AgentRunner:
                 llm_kwargs["temperature"] = 0.1
             self._model_cache[model_name] = ChatGoogleGenerativeAI(**llm_kwargs)
         base_llm = self._model_cache[model_name]
-        tools_to_bind = [TOOL_REGISTRY[name] for name in allowed_tool_names if name in TOOL_REGISTRY]
+        tools_to_bind = tool_declarations(allowed_tool_names)
         bound_llm = base_llm.bind_tools(tools_to_bind) if tools_to_bind else base_llm
         return base_llm, bound_llm
 
@@ -555,7 +565,7 @@ class AgentRunner:
                     )
                 )
             )
-            tools_to_bind = [TOOL_REGISTRY[name] for name in allowed_tool_names if name in TOOL_REGISTRY]
+            tools_to_bind = tool_declarations(allowed_tool_names)
             synthesis_llm = (
                 base_llm.bind_tools(tools_to_bind, tool_choice="none")
                 if tools_to_bind
