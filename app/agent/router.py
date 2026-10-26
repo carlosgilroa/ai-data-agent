@@ -8,7 +8,15 @@ from app.schemas.query import IntentType, RouterDecision
 
 logger = logging.getLogger(__name__)
 
-SEMANTIC_TOOLS = ["search_semantic_catalog", "describe_explore", "get_field_values", "run_semantic_query"]
+# Named after Looker's agent tools (get_explores, get_dimensions, get_measures, query)
+SEMANTIC_TOOLS = [
+    "search_semantic_catalog",
+    "get_explores",
+    "get_dimensions",
+    "get_measures",
+    "get_field_values",
+    "query",
+]
 RAW_SQL_TOOLS = ["get_table_schema", "run_sql_query"]
 
 ROUTER_SYSTEM_PROMPT = """You are an Intent Classification & Semantic Query Router for a personal finance and lakehouse analytics AI agent.
@@ -21,9 +29,13 @@ Your responsibility is twofold:
    - "simple_query": Direct single-metric lookups, distinct counts, category spend aggregations, or single-table aggregations.
    - "complex_query": Multi-hop analytical questions, period-over-period comparisons, Tier 1 vs Tier 2 accounting reconciliations, multi-currency FX analysis, budget variance diagnostics, open-ended exploration of transactions.
 
-2. Semantic Query Decomposition (for analytical queries):
-   - "metric_search_phrase": Construct a natural analytical search phrase combining the metric/calculation intent with domain context, used to retrieve LookML explores and fields from a vector catalog (e.g. "total food spending expenses", "monthly savings rate", "spend by trip label", "category budget over cap").
-   - "entity_keywords": Extract domain entities, category keywords, merchants, accounts, or currencies (e.g. ["food"], ["transportation"]).
+2. Split analytical questions into LookML terms (leave a list empty when the question has none):
+   - "measures": what to calculate, in plain words, e.g. ["total spend"], ["savings rate"], ["number of expenses"].
+   - "dimensions": what to group or break down by, e.g. ["merchant"], ["category group", "month"]. Empty for a single total.
+   - "filter_values": specific values to filter on, exactly as the user wrote them, e.g. ["restaurants"], ["uber"], ["Eurotrip"]. Never dates.
+   - "time_period": the period as a filter phrase, e.g. "last month", "this year", "2026-09", "2026-08, 2026-09".
+   Example: "How much did I spend on restaurants last month?" -> measures ["total spend"], dimensions [], filter_values ["restaurants"], time_period "last month".
+   Example: "Top merchants by spend this year" -> measures ["total spend"], dimensions ["merchant"], filter_values [], time_period "this year".
 """
 
 
@@ -101,7 +113,7 @@ class IntentRouter:
                     HumanMessage(
                         content=(
                             'Respond ONLY with valid JSON: {"intent": "out_of_scope"|"capabilities"|"simple_query"|"complex_query", '
-                            '"reasoning": "...", "metric_search_phrase": "...", "entity_keywords": ["..."]}'
+                            '"reasoning": "...", "measures": ["..."], "dimensions": ["..."], "filter_values": ["..."], "time_period": "..."}'
                         )
                     )
                 ]
@@ -113,8 +125,10 @@ class IntentRouter:
                 return RouterDecision(
                     intent=parsed.get("intent", "simple_query"),
                     reasoning=parsed.get("reasoning", "Parsed via JSON fallback."),
-                    metric_search_phrase=parsed.get("metric_search_phrase"),
-                    entity_keywords=parsed.get("entity_keywords", []),
+                    measures=parsed.get("measures") or [],
+                    dimensions=parsed.get("dimensions") or [],
+                    filter_values=parsed.get("filter_values") or [],
+                    time_period=parsed.get("time_period"),
                 )
             except Exception:
                 pass
@@ -133,7 +147,7 @@ class IntentRouter:
         if intent == "out_of_scope":
             return (settings.GEMINI_ROUTER_MODEL, 0, [])
         if intent == "capabilities":
-            return (settings.GEMINI_ROUTER_MODEL, 2, ["search_semantic_catalog", "describe_explore"])
+            return (settings.GEMINI_ROUTER_MODEL, 2, ["get_explores", "get_measures", "get_dimensions"])
         if intent == "simple_query":
             return (settings.GEMINI_SIMPLE_MODEL, 5, analytical_tools)
         # complex_query

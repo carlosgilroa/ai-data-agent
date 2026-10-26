@@ -25,8 +25,9 @@ flowchart TD
     DynamicMeta --> CatalogItems
     
     CatalogItems --> VectorStore[ChromaDB Vector Store: cosine space]
+    Instructions[agent_instructions.yaml: glossary, golden queries] --> CatalogItems
+    VectorStore --> Retrieval[Per-question retrieval for the agent prompt]
     VectorStore --> SearchTool[search_semantic_catalog Tool]
-    VectorStore --> Prompt[Top matches added to the agent prompt]
 ```
 
 ---
@@ -50,9 +51,10 @@ The indexer uses the Python `lkml` parser to extract complete semantic metadata 
      ```
 4. **Models, Explores & Relational Joins (`models/**/*.model.lkml`)**:
    - Extracts `explores` and `joins` including `sql_on`, `relationship` (`many_to_one`), and `type` (`left_outer`).
-5. **Semantic search only returns explores and fields**:
-   - `search_semantic_catalog` filters Chroma to `explore`, `measure` and `dimension` items (`item_types`), so tables never crowd out fields. Table schemas stay available through `get_table_schema` for the raw SQL fallback.
-   - The runner adds the top `SEMANTIC_SEARCH_TOP_K` matches (default 12) to the prompt, so input tokens stay roughly flat as the LookML project grows.
+5. **Labels and agent instructions**:
+   - A field's LookML `label` is prefixed to its description, since Looker also matches user words against labels.
+   - Glossary entries (`glossary`) and golden queries (`golden_query`) from `agent_instructions.yaml` are indexed as their own item types. Golden queries that no longer compile are skipped with a warning.
+   - Per question, the agent's retrieval searches measures and dimensions separately, picks explores first and keeps up to 5 of each type inside them (see the agent architecture doc). `search_semantic_catalog` remains as a tool for free-text searches of field descriptions.
 6. **Universal Dynamic Table & PDT Metadata**:
    - DuckDB inspects all 8 tables and LookML persistent derived tables (PDTs like `pdt_category_mom_velocity`), dynamically capturing row counts (`COUNT(*)`) and calendar bounds (`MIN/MAX` over `date` or `year_month`):
      ```text
@@ -81,4 +83,4 @@ To prevent low-relevance items from polluting the LLM context while ensuring sin
 
 ## 4. Automatic Re-Indexing
 
-The semantic model keeps a fingerprint of every `.lkml` file (path, modification time, size). Before each agent query, `semantic_layer.ensure_fresh()` compares it; when the LookML changed, the model is reloaded and the Chroma catalog is rebuilt, so new fields are searchable without restarting the server or running `scripts/run_indexer.py`.
+The semantic model keeps a fingerprint of every `.lkml` file (path, modification time, size) and the instructions file's modification time. Before each agent query, `semantic_layer.ensure_fresh()` compares them; when the LookML or the instructions changed, the model is reloaded and the Chroma catalog is rebuilt, so new fields are searchable without restarting the server or running `scripts/run_indexer.py`.

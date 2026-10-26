@@ -4,9 +4,11 @@ from app.main import app
 from app.agent.runner import (
     agent_runner,
     search_semantic_catalog,
-    describe_explore,
+    get_explores,
+    get_dimensions,
+    get_measures,
     get_field_values,
-    run_semantic_query,
+    query,
     get_table_schema,
     run_sql_query,
     TOOL_REGISTRY,
@@ -34,22 +36,26 @@ def test_agent_tools_execution():
     assert "total_spend_cop" in cat_res
     assert "explores:" in cat_res
 
-    # 2. Explore description lists visible fields only
-    desc = describe_explore.invoke({"explore": "fct_transactions"})
-    assert "fct_transactions.total_spend_cop" in desc
-    assert "dim_categories.category_name" in desc
-    assert "fct_transactions.category_name " not in desc  # hidden stale ledger copy
+    # 2. Looker-style metadata tools list explores, dimensions and measures (visible fields only)
+    assert "fct_transactions:" in get_explores.invoke({})
+    dims = get_dimensions.invoke({"explore": "fct_transactions"})
+    measures = get_measures.invoke({"explore": "fct_transactions"})
+    assert "dim_categories.category_name" in dims
+    assert "fct_transactions.total_spend_cop" not in dims
+    assert "fct_transactions.total_spend_cop" in measures
+    assert "fct_transactions.category_name " not in dims  # hidden stale ledger copy
 
     # 3. Field values come through the compiler
     values = json.loads(get_field_values.invoke({
         "explore": "fct_transactions",
         "field": "dim_categories.category_name",
-        "pattern": "transport",
+        "search": "transport",
     }))
     assert "Public transport" in values["values"]
+    assert values["truncated"] is False
 
     # 4. Semantic query: the compiler writes the SQL
-    res = json.loads(run_semantic_query.invoke({
+    res = json.loads(query.invoke({
         "explore": "mart_monthly_pnl",
         "fields": ["mart_monthly_pnl.year_month", "mart_monthly_pnl.total_spend_cop"],
         "limit": 3,
@@ -65,7 +71,7 @@ def test_agent_tools_execution():
 
 def test_semantic_tool_errors_are_returned_to_the_model():
     """Unknown or hidden fields come back as a readable error with suggestions, not an exception."""
-    out = run_semantic_query.invoke({
+    out = query.invoke({
         "explore": "fct_transactions",
         "fields": ["fct_transactions.total_spend_usd"],
     })
@@ -140,7 +146,9 @@ def test_intent_router_route_config():
     """Verify IntentRouter maps each intent to the expected model, step budget, and tools."""
     from app.agent.router import intent_router
 
-    semantic_tools = ["search_semantic_catalog", "describe_explore", "get_field_values", "run_semantic_query"]
+    semantic_tools = [
+        "search_semantic_catalog", "get_explores", "get_dimensions", "get_measures", "get_field_values", "query",
+    ]
     fallback_tools = ["get_table_schema", "run_sql_query"]
 
     m_oos, steps_oos, tools_oos = intent_router.get_route_config("out_of_scope")
@@ -151,7 +159,7 @@ def test_intent_router_route_config():
     m_cap, steps_cap, tools_cap = intent_router.get_route_config("capabilities")
     assert m_cap == settings.GEMINI_ROUTER_MODEL
     assert steps_cap == 2
-    assert tools_cap == ["search_semantic_catalog", "describe_explore"]
+    assert tools_cap == ["get_explores", "get_measures", "get_dimensions"]
 
     m_sim, steps_sim, tools_sim = intent_router.get_route_config("simple_query")
     assert m_sim == settings.GEMINI_SIMPLE_MODEL
@@ -214,18 +222,20 @@ def test_run_sql_query_docstring_is_generalized():
     assert "dim_accounts" not in doc
 
 
-def test_intent_router_semantic_decomposition_schema():
-    """Verify RouterDecision schema includes metric_search_phrase and entity_keywords."""
+def test_intent_router_splits_question_in_lookml_terms():
+    """RouterDecision splits a question into measures, dimensions, filter values and a time period."""
     from app.schemas.query import RouterDecision
     decision = RouterDecision(
         intent="simple_query",
-        reasoning="User wants aggregated spend for food last month",
-        metric_search_phrase="total food spending expenses",
-        entity_keywords=["food"],
+        reasoning="User wants restaurant spend last month",
+        measures=["total spend"],
+        filter_values=["restaurants"],
+        time_period="last month",
     )
-    assert decision.intent == "simple_query"
-    assert decision.metric_search_phrase == "total food spending expenses"
-    assert decision.entity_keywords == ["food"]
+    assert decision.measures == ["total spend"]
+    assert decision.dimensions == []
+    assert decision.filter_values == ["restaurants"]
+    assert decision.time_period == "last month"
 
 
 def test_session_memory_turn_validation_safety():
@@ -334,7 +344,7 @@ class _FakeLLM:
         if self.calls == 1:
             return AIMessage(
                 content="",
-                tool_calls=[{"name": "run_semantic_query", "args": self.query_args, "id": "call-1"}],
+                tool_calls=[{"name": "query", "args": self.query_args, "id": "call-1"}],
             )
         tool_result = next(m for m in reversed(messages) if isinstance(m, ToolMessage))
         return AIMessage(content=f"Answer based on: {tool_result.content[:80]}")
@@ -358,7 +368,7 @@ def test_agent_loop_with_fake_llm_is_traceable(monkeypatch):
         intent_router,
         "classify",
         lambda query, has_session_context=False: RouterDecision(
-            intent="simple_query", reasoning="test", metric_search_phrase="total spend"
+            intent="simple_query", reasoning="test", measures=["total spend"], time_period="2026-10"
         ),
     )
 
@@ -386,7 +396,7 @@ def test_raw_sql_fallback_is_marked_ungoverned():
     assert trace.governed is False
     assert trace.notes == [_AnswerTrace.RAW_SQL_NOTE]
 
-    denied = AgentRunner._run_tool("run_sql_query", {"sql": "SELECT 1"}, ["run_semantic_query"], "simple_query", trace)
+    denied = AgentRunner._run_tool("run_sql_query", {"sql": "SELECT 1"}, ["query"], "simple_query", trace)
     assert "not permitted" in denied
 
 
@@ -406,3 +416,99 @@ def test_token_usage_is_tracked_per_request():
     assert usage["input_tokens"] == 2800
     assert usage["output_tokens"] == 160
     assert [c["model"] for c in usage["calls"]] == ["router", "main"]
+
+
+def test_field_values_flag_a_cut_off_list():
+    """A value list longer than the limit says so, so the model searches instead of concluding."""
+    from app.semantic.service import semantic_layer
+
+    res = semantic_layer.field_values("fct_transactions", "dim_categories.category_name", limit=30)
+    assert res["truncated"] is True
+    assert res["total"] > 30
+    assert len(res["values"]) == 30
+    assert "Restaurants & fast food" not in res["values"]  # past the cut-off alphabetically
+
+
+def test_value_search_finds_the_field_holding_a_word():
+    """Looker-style fuzzy search: a word is looked up in every searchable text field of the explore."""
+    from app.semantic.service import semantic_layer
+
+    matches = semantic_layer.search_values("fct_transactions", "restaurants")
+    assert matches[0]["field"] == "dim_categories.category_name"  # the category list ranks before merchants
+    assert "Restaurants & fast food" in matches[0]["values"]
+
+    fields = [m["field"] for m in semantic_layer.search_values("fct_transactions", "uber")]
+    assert "fct_transactions.merchant" in fields
+
+
+def test_value_search_respects_lookml_suggestions_setting():
+    """Fields with `suggestions: no`, primary keys and hidden fields are never searched."""
+    from app.semantic.service import semantic_layer
+
+    searchable = {f.id for f in semantic_layer.model.searchable_fields("fct_transactions")}
+    assert "dim_categories.category_name" in searchable
+    assert "fct_transactions.transaction_id" not in searchable  # primary key
+    note = next(f for f in semantic_layer.model.explore_fields("fct_transactions") if f.name == "note")
+    if not note.suggestable:  # wallet-lookml marks the free-text note with `suggestions: no`
+        assert "fct_transactions.note" not in searchable
+
+
+def test_retrieval_resolves_filter_values_and_picks_explores():
+    """Two-level retrieval: explores first, fields within them, and filter values found in the data."""
+    from app.agent.tools.rag_tool import retrieve
+
+    r = retrieve("How much did the eurotrip cost?", measure_phrase="total spend", filter_values=["eurotrip"])
+    assert 0 < len(r.explores) <= settings.RETRIEVAL_EXPLORES
+    assert all(set(m.explores) & set(r.explores) for m in r.measures)
+    assert r.dimensions == []  # no group-by asked, so no dimension search
+    found = {v for m in r.filter_values[0]["matches"] for v in m["values"]}
+    assert "Eurotrip26" in found
+
+
+def test_glossary_maps_business_words_to_filters():
+    """A glossary term the data doesn't contain ("eating out") resolves through the agent instructions."""
+    from app.agent.tools.rag_tool import retrieve, resolve_filter_value, retrieve_glossary
+    from app.semantic.service import semantic_layer
+
+    if not any(e.term == "eating out" for e in semantic_layer.instructions.glossary):
+        pytest.skip("No 'eating out' glossary entry in the agent instructions")
+    glossary = retrieve_glossary("How much did I spend eating out?")
+    assert any(g["term"] == "eating out" for g in glossary)
+    resolved = resolve_filter_value("eating out", glossary)
+    assert resolved["source"] == "glossary"
+    assert all(m["values"] == ["Restaurants & fast food"] for m in resolved["matches"])
+
+
+def test_golden_queries_in_instructions_compile():
+    """Every golden query in the agent instructions compiles, and none repeats an evaluation question."""
+    import json as _json
+    from pathlib import Path
+    from app.semantic.compiler import SemanticQuery
+    from app.semantic.service import semantic_layer
+
+    eval_questions = {
+        q["question"].lower()
+        for q in _json.loads((Path(__file__).parent / "golden" / "questions.json").read_text(encoding="utf-8"))["questions"]
+    }
+    for golden in semantic_layer.instructions.golden_queries:
+        semantic_layer.compile(SemanticQuery(**golden.query))
+        assert golden.question.lower() not in eval_questions
+
+
+def test_default_filters_apply_unless_the_query_sets_the_field(monkeypatch):
+    """Looker-style default filters from the agent instructions are added and reported in the notes."""
+    from app.semantic.compiler import SemanticQuery
+    from app.semantic.instructions import AgentInstructions, DefaultFilter
+    from app.semantic.service import semantic_layer
+
+    instructions = AgentInstructions(default_filters=[
+        DefaultFilter(explore="fct_transactions", field="fct_transactions.record_state", value="reconciled"),
+    ])
+    monkeypatch.setattr(semantic_layer, "_instructions", instructions)
+    q = SemanticQuery(explore="fct_transactions", fields=["fct_transactions.transaction_count"])
+    res = semantic_layer.run(q)
+    assert "Default filter applied: fct_transactions.record_state = reconciled" in res["notes"]
+    assert "reconciled" in res["sql"]
+
+    own = semantic_layer.run(q.model_copy(update={"filters": {"fct_transactions.record_state": "cleared"}}))
+    assert not any(n.startswith("Default filter") for n in own["notes"])

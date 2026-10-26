@@ -33,9 +33,15 @@ class Settings(BaseSettings):
     AGENT_TODAY: str = ""
     # Let the agent fall back to read-only raw SQL when no explore can answer a question
     ALLOW_RAW_SQL_FALLBACK: bool = True
+    AGENT_INSTRUCTIONS_PATH: str = "agent_instructions.yaml"  # glossary, default filters, golden queries
     QUERY_LOG_PATH: str = "logs/agent_queries.jsonl"  # full trace of each agent answer; empty disables it
     # Number of explores/fields the catalog search returns to the model
-    SEMANTIC_SEARCH_TOP_K: int = 12
+    # Looker-style retrieval per question: explores first, then fields within them, then instructions
+    RETRIEVAL_EXPLORES: int = 3
+    RETRIEVAL_MEASURES: int = 5
+    RETRIEVAL_DIMENSIONS: int = 5
+    RETRIEVAL_GLOSSARY: int = 3
+    RETRIEVAL_GOLDEN_QUERIES: int = 2
 
     # Data paths (pointing to local lakehouse and semantic layer)
     WALLET_DATA_DIR: Path = Path("C:/projects/wallet/data")

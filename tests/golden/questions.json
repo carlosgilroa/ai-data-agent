@@ -416,6 +416,36 @@
         "limit": 1
       },
       "reference_sql": "WITH s AS (SELECT c.category_name, STRFTIME(CAST(t.date AS DATE), '%Y-%m') AS ym, SUM(CASE WHEN t.nature = 'tier2_refund_offset' THEN -t.amount ELSE ABS(t.amount) END) AS v FROM master_records t LEFT JOIN dim_categories c ON t.category_id = c.category_id WHERE NOT t.is_transfer AND t.nature IN ('tier1_operational_cost','tier2_capital_outlay','tier2_refund_offset') AND NOT (t.nature = 'tier2_refund_offset' AND COALESCE(c.category_group, '') = 'Income') GROUP BY 1, 2) SELECT COALESCE(sep.category_name, aug.category_name), COALESCE(sep.v, 0) - COALESCE(aug.v, 0) AS d FROM (SELECT * FROM s WHERE ym = '2026-09') sep FULL OUTER JOIN (SELECT * FROM s WHERE ym = '2026-08') aug ON sep.category_name = aug.category_name WHERE aug.category_name IS NOT NULL ORDER BY d DESC LIMIT 1"
+    },
+    {
+      "id": "restaurants_last_month",
+      "question": "How much did I spend on restaurants last month?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "dim_categories.category_name": "Restaurants & fast food",
+          "fct_transactions.transaction_month": "last month"
+        }
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT t.is_transfer AND t.nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(t.amount) ELSE 0 END) - SUM(CASE WHEN NOT t.is_transfer AND t.nature = 'tier2_refund_offset' THEN t.amount ELSE 0 END) FROM master_records t JOIN dim_categories c ON t.category_id = c.category_id WHERE c.category_name = 'Restaurants & fast food' AND STRFTIME(CAST(t.date AS DATE), '%Y-%m') = '2026-09'"
+    },
+    {
+      "id": "uber_sep",
+      "question": "How much did I spend at Uber in September 2026?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "fct_transactions.merchant": "%uber%",
+          "fct_transactions.transaction_month": "2026-09"
+        }
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT t.is_transfer AND t.nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(t.amount) ELSE 0 END) - SUM(CASE WHEN NOT t.is_transfer AND t.nature = 'tier2_refund_offset' THEN t.amount ELSE 0 END) FROM master_records t WHERE t.merchant ILIKE '%uber%' AND STRFTIME(CAST(t.date AS DATE), '%Y-%m') = '2026-09'"
     }
   ]
 }

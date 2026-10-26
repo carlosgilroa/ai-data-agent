@@ -6,23 +6,31 @@ IntentType = Literal["out_of_scope", "capabilities", "simple_query", "complex_qu
 
 
 class RouterDecision(BaseModel):
-    """Structured output returned by the Intent Router."""
+    """Structured output of the intent router: the intent plus the question split in LookML terms."""
     intent: IntentType = Field(..., description="Classified query intent category")
     reasoning: str = Field(..., description="Concise explanation for the chosen intent")
-    metric_search_phrase: Optional[str] = Field(
-        default=None,
-        description="A natural semantic phrase combining the metric/calculation intent with domain context (e.g. 'total food spending expenses', 'monthly savings rate', 'net cashflow after refunds') suitable for dense vector catalog search.",
-    )
-    entity_keywords: List[str] = Field(
+    measures: List[str] = Field(
         default_factory=list,
-        description="Extracted domain entities, topics, category names, or account names (e.g. ['food'], ['transportation', 'uber'])",
+        description="What to calculate, in plain words (e.g. ['total spend'], ['savings rate'], ['number of expenses']).",
+    )
+    dimensions: List[str] = Field(
+        default_factory=list,
+        description="What to group or break the result down by (e.g. ['merchant'], ['category group', 'month']). Empty when the question asks for a single total.",
+    )
+    filter_values: List[str] = Field(
+        default_factory=list,
+        description="Specific values the user wants to filter on, as written (e.g. ['restaurants'], ['uber'], ['Eurotrip'], ['Bancolombia']). Not dates.",
+    )
+    time_period: Optional[str] = Field(
+        default=None,
+        description="The period asked about, as a filter phrase (e.g. 'last month', 'this year', '2026-09', '2026-08, 2026-09').",
     )
 
 
 class AgentThoughtStep(BaseModel):
     """Represents a single reasoning step or tool execution by the AI agent."""
     step_number: int = Field(..., description="Order of step execution")
-    tool: str = Field(..., description="Tool invoked (e.g. search_semantic_catalog, run_semantic_query)")
+    tool: str = Field(..., description="Tool invoked (e.g. get_field_values, query)")
     tool_input: Dict[str, Any] = Field(default_factory=dict, description="Input arguments passed to tool")
     tool_output: Any = Field(None, description="Output returned by tool")
     thought: Optional[str] = Field(None, description="Internal reasoning leading to this action")

@@ -71,7 +71,7 @@ def test_vector_store_search_and_similarity_cutoff():
         assert abs((1.0 - item.distance) - item.similarity_score) < 1e-3
 
     # Domain entity search ('groceries') succeeds under dynamic cutoff
-    grocery_matches = vector_store.search("groceries", top_k=5)
+    grocery_matches = vector_store.search("groceries", top_k=5, item_types=["dimension"])
     assert len(grocery_matches) > 0
     matched_ids = {m.id for m in grocery_matches}
     assert "mart_expense_summary.category_name" in matched_ids or "mart_expense_summary.labels" in matched_ids

@@ -44,6 +44,21 @@ class Field:
     case: Optional[dict] = None  # CASE dimension definition
     group: Optional[str] = None  # dimension_group name for timeframe fields
     timeframe: Optional[str] = None  # month, date, year...
+    label: str = ""
+    suggestable: bool = True  # LookML `suggestions`; `no` keeps free text out of value searches
+    suggest_explore: Optional[str] = None  # LookML `suggest_explore` / `suggest_dimension`: where to
+    suggest_dimension: Optional[str] = None  # look values up instead of this field
+
+    @property
+    def is_searchable(self) -> bool:
+        """A text dimension whose values can be looked up (Looker's filter suggestions)."""
+        return (
+            self.kind == "dimension"
+            and self.type == "string"
+            and not self.hidden
+            and not self.primary_key  # keys are identifiers, not words people search for
+            and self.suggestable
+        )
 
     @property
     def id(self) -> str:
@@ -146,6 +161,7 @@ class SemanticModel:
         else:
             table_sql = name
 
+        view_suggestions = _is_yes(raw.get("suggestions", "yes"))
         fields: Dict[str, Field] = {}
         for d in raw.get("dimensions", []):
             fields[d["name"]] = Field(
@@ -158,6 +174,10 @@ class SemanticModel:
                 hidden=_is_yes(d.get("hidden", "no")),
                 primary_key=_is_yes(d.get("primary_key", "no")),
                 case=d.get("case"),
+                label=d.get("label", ""),
+                suggestable=view_suggestions and _is_yes(d.get("suggestions", "yes")),
+                suggest_explore=d.get("suggest_explore"),
+                suggest_dimension=d.get("suggest_dimension"),
             )
 
         groups: Dict[str, dict] = {}
@@ -175,6 +195,8 @@ class SemanticModel:
                     hidden=_is_yes(g.get("hidden", "no")),
                     group=g["name"],
                     timeframe=tf,
+                    label=g.get("label", ""),
+                    suggestable=False,
                 )
 
         for m in raw.get("measures", []):
@@ -193,6 +215,8 @@ class SemanticModel:
                 description=m.get("description", ""),
                 hidden=_is_yes(m.get("hidden", "no")),
                 filters=filters,
+                label=m.get("label", ""),
+                suggestable=False,
             )
 
         return View(
@@ -241,6 +265,10 @@ class SemanticModel:
                     continue
                 result.append(f if alias == view_name else _aliased(f, alias))
         return result
+
+    def searchable_fields(self, explore_name: str) -> List[Field]:
+        """Text dimensions of an explore whose values can be searched."""
+        return [f for f in self.explore_fields(explore_name) if f.is_searchable]
 
     def explores_for_view(self, view_name: str) -> List[str]:
         return [

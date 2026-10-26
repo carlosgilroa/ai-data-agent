@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 from typing import List, Dict, Any
@@ -184,7 +185,7 @@ class SemanticCatalogIndexer:
                                     item_type="dimension",
                                     name=dim_name,
                                     view=view_name,
-                                    description=dim.get("description", f"Dimension {dim_name} in {view_name}"),
+                                    description=_with_label(dim, dim.get("description", f"Dimension {dim_name} in {view_name}")),
                                     sql_formula=dim_sql,
                                     table_name=table_name,
                                     examples=[
@@ -202,7 +203,7 @@ class SemanticCatalogIndexer:
                             dg_sql = dgroup.get("sql", f"${{TABLE}}.{dg_name}")
                             tf_fields = [f"{view_name}.{dg_name}_{tf}" for tf in timeframes]
                             tf_note = f" [Fields: {', '.join(tf_fields)}]" if timeframes else ""
-                            dg_desc = dgroup.get("description", f"Time dimension group {dg_name} in {view_name}") + tf_note
+                            dg_desc = _with_label(dgroup, dgroup.get("description", f"Time dimension group {dg_name} in {view_name}")) + tf_note
                             items.append(
                                 CatalogItem(
                                     id=f"{view_name}.{dg_name}",
@@ -225,7 +226,7 @@ class SemanticCatalogIndexer:
                             if str(measure.get("hidden", "no")).lower() == "yes":
                                 continue
                             m_name = measure.get("name", "")
-                            desc = measure.get("description", f"Measure {m_name} in {view_name}")
+                            desc = _with_label(measure, measure.get("description", f"Measure {m_name} in {view_name}"))
                             filter_strs = self._extract_measure_filters(measure)
                             if filter_strs:
                                 desc += f" [Filters: {', '.join(filter_strs)}]"
@@ -386,13 +387,51 @@ class SemanticCatalogIndexer:
 
         return items
 
+    @staticmethod
+    def extract_from_instructions() -> List[CatalogItem]:
+        """Glossary entries and golden queries from the agent instructions, retrieved per question."""
+        from app.semantic.compiler import SemanticQuery, SemanticQueryError
+        from app.semantic.service import semantic_layer
+
+        instructions = semantic_layer.instructions
+        items: List[CatalogItem] = []
+        for i, entry in enumerate(instructions.glossary):
+            items.append(
+                CatalogItem(
+                    id=f"glossary.{i}",
+                    item_type="glossary",
+                    name=entry.term,
+                    view="agent_instructions",
+                    description=f"{entry.term}, {', '.join(entry.synonyms)}: {entry.meaning}",
+                    sql_formula=entry.model_dump_json(),
+                )
+            )
+        for i, golden in enumerate(instructions.golden_queries):
+            try:
+                semantic_layer.compile(SemanticQuery(**golden.query))
+            except (SemanticQueryError, ValueError) as e:
+                # A stale example would teach the agent a wrong query, so it is left out
+                logger.warning("Golden query skipped, it no longer compiles: %s (%s)", golden.question, e)
+                continue
+            items.append(
+                CatalogItem(
+                    id=f"golden_query.{i}",
+                    item_type="golden_query",
+                    name=golden.question,
+                    view="agent_instructions",
+                    description=golden.question,
+                    sql_formula=json.dumps(golden.query),
+                )
+            )
+        return items
+
     def run_indexing(self) -> Dict[str, Any]:
-        """Wipe ChromaDB collection and execute full indexing pipeline from LookML and Lakehouse."""
+        """Wipe ChromaDB collection and execute full indexing pipeline from LookML, Lakehouse and instructions."""
         vector_store.clear()
 
         lookml_items = self.extract_from_lookml()
         lakehouse_items = self.extract_from_lakehouse()
-        all_items = lookml_items + lakehouse_items
+        all_items = lookml_items + lakehouse_items + self.extract_from_instructions()
 
         vector_store.add_items(all_items)
 
@@ -401,6 +440,8 @@ class SemanticCatalogIndexer:
         explores_count = sum(1 for i in all_items if i.item_type == "explore")
         joins_count = sum(1 for i in all_items if i.item_type == "join")
         tables_count = sum(1 for i in all_items if i.item_type == "table")
+        glossary_count = sum(1 for i in all_items if i.item_type == "glossary")
+        golden_count = sum(1 for i in all_items if i.item_type == "golden_query")
 
         logger.info(
             "Indexing completed (clean slate): %d total items (%d metrics, %d dimensions, %d explores, %d joins, %d tables)",
@@ -413,8 +454,16 @@ class SemanticCatalogIndexer:
             "explores": explores_count,
             "joins": joins_count,
             "tables": tables_count,
+            "glossary": glossary_count,
+            "golden_queries": golden_count,
             "items": all_items
         }
+
+
+def _with_label(field: Dict[str, Any], description: str) -> str:
+    """Prefix a field description with its LookML label, which Looker also matches user words against."""
+    label = field.get("label")
+    return f"{label}. {description}" if label else description
 
 
 indexer = SemanticCatalogIndexer()

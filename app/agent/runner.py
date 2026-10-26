@@ -9,9 +9,11 @@ from app.schemas.query import QueryRequest, QueryResponse, AgentThoughtStep
 from app.agent.tools.duckdb_tool import duckdb_tool
 from app.agent.tools.rag_tool import (
     get_table_schema as raw_get_table_schema,
+    Retrieval,
+    retrieve,
     search_semantic_catalog as raw_search_semantic_catalog,
 )
-from app.agent.prompts import AGENT_SYSTEM_PROMPT, RAW_SQL_DISABLED, RAW_SQL_ENABLED
+from app.agent.prompts import AGENT_SYSTEM_PROMPT, DEFAULT_PERSONA, RAW_SQL_DISABLED, RAW_SQL_ENABLED
 from app.agent.router import intent_router
 from app.agent.usage import UsageCallback, start_tracking, summarize
 from app.semantic.compiler import SemanticQuery, SemanticQueryError
@@ -28,39 +30,58 @@ TOOL_PREVIEW_ROWS = 50
 
 @tool
 def search_semantic_catalog(query: str) -> str:
-    """Find the LookML explores, measures and dimensions that fit a question.
-    Use a complete analytical phrase (e.g. 'total spend by category', 'savings rate per month').
-    Returns field names as view.field together with the explores they can be queried in.
+    """Search the descriptions of LookML measures and dimensions for a phrase
+    (e.g. 'spend net of refunds', 'budget cap'). Returns view.field names and the explores they are in.
     """
     return raw_search_semantic_catalog(query)
 
 
 @tool
-def describe_explore(explore: str) -> str:
-    """List every visible dimension and measure of a LookML explore with its description."""
+def get_explores() -> str:
+    """List the LookML explores (the queryable data models) with what each one answers."""
+    return semantic_layer.explore_overview()
+
+
+@tool
+def get_dimensions(explore: str) -> str:
+    """List the visible dimensions of an explore (fields to group by or filter on), with descriptions."""
     try:
-        return semantic_layer.describe_explore(explore)
+        return semantic_layer.describe_fields(explore, "dimension")
     except SemanticQueryError as e:
         return f"Error: {e}"
 
 
 @tool
-def get_field_values(explore: str, field: str, pattern: Optional[str] = None, limit: int = 30) -> str:
-    """List the distinct values of a dimension (e.g. dim_categories.category_name, dim_labels.label_name,
-    fct_transactions.merchant) in an explore. Give a pattern (e.g. 'transport') to search for a value.
-    Use it to get the exact spelling before filtering.
+def get_measures(explore: str) -> str:
+    """List the visible measures of an explore (the metrics it can calculate), with descriptions."""
+    try:
+        return semantic_layer.describe_fields(explore, "measure")
+    except SemanticQueryError as e:
+        return f"Error: {e}"
+
+
+@tool
+def get_field_values(explore: str, field: Optional[str] = None, search: Optional[str] = None) -> str:
+    """Look up filter values, like Looker's filter suggestions.
+    With `field` (view.field): up to 100 distinct values of that dimension, only those containing `search` if given.
+    With only `search`: searches every searchable text dimension of the explore and returns which ones contain it.
+    "truncated": true means more values exist than were returned; search for the value instead of listing.
     """
     try:
-        values = semantic_layer.field_values(explore, field, pattern=pattern, limit=max(1, min(limit, 100)))
-        if not values:
-            return f"No values found for {field}" + (f" matching '{pattern}'." if pattern else ".")
-        return json.dumps({"field": field, "count": len(values), "values": values}, default=str)
+        if field:
+            return json.dumps(semantic_layer.field_values(explore, field, search=search), default=str)
+        if search:
+            matches = semantic_layer.search_values(explore, search)
+            if not matches:
+                return f"No text field of {explore} contains '{search}'. Try another word or a broader term."
+            return json.dumps({"search": search, "matches": matches[:5]}, default=str)
+        return "Error: pass a field to list its values, or a search term to find which field contains it."
     except SemanticQueryError as e:
         return f"Error: {e}"
 
 
 @tool
-def run_semantic_query(
+def query(
     explore: str,
     fields: List[str],
     filters: Optional[Dict[str, str]] = None,
@@ -118,11 +139,64 @@ def _semantic_tool_output(result: Dict[str, Any]) -> str:
     return json.dumps(payload, default=str)
 
 
+def _format_retrieval(retrieval: Retrieval, decision: Any) -> str:
+    """The per-question context, in LookML terms: explores, fields, resolved filter values, time,
+    glossary and golden queries. Only what retrieval found is shown, so the prompt stays small.
+    """
+    model = semantic_layer.model
+    lines = ["### Context for this question"]
+    lines.append("Explores that fit best:")
+    for name in retrieval.explores:
+        explore = model.explores.get(name)
+        if explore is None:
+            continue
+        groups: Dict[str, List[str]] = {}
+        for f in model.explore_fields(name):
+            if f.is_time and f.timeframe != "raw":
+                groups.setdefault(f"{f.view}.{f.group}", []).append(f.timeframe)
+        lines.append(f"- {name}: {explore.label}. {explore.description}")
+        if groups:
+            lines.append("  Time fields: " + "; ".join(f"{g}_{{{', '.join(tfs)}}}" for g, tfs in groups.items()))
+    if retrieval.measures:
+        lines.append("Measures:")
+        lines += [f"- {i.view}.{i.name} (in {', '.join(i.explores)}): {i.description}" for i in retrieval.measures]
+    if retrieval.dimensions:
+        lines.append("Dimensions:")
+        lines += [f"- {i.view}.{i.name} (in {', '.join(i.explores)}): {i.description}" for i in retrieval.dimensions]
+    if retrieval.filter_values:
+        lines.append("Filter values found:")
+        for value in retrieval.filter_values:
+            if not value["matches"]:
+                lines.append(f'- "{value["value"]}": not found in any searchable field of these explores.')
+                continue
+            found = "; ".join(
+                f"{m['field']} = {', '.join(repr(v) for v in m['values'])}" for m in value["matches"]
+            )
+            via = " (from the glossary)" if value["source"] == "glossary" else ""
+            lines.append(f'- "{value["value"]}"{via}: {found}')
+    if decision.time_period:
+        lines.append(f'Time period asked: "{decision.time_period}" (use it as the filter on the explore\'s time field).')
+    if retrieval.glossary:
+        lines.append("Glossary:")
+        for entry in retrieval.glossary:
+            text = f'- "{entry["term"]}": {entry["meaning"]}'
+            if entry.get("field") and entry.get("value"):
+                text += f' (filter {entry["field"]} = "{entry["value"]}")'
+            lines.append(text)
+    if retrieval.golden_queries:
+        lines.append("Verified example queries:")
+        for golden in retrieval.golden_queries:
+            lines.append(f'- "{golden["question"]}" -> {json.dumps(golden["query"])}')
+    return "\n".join(lines)
+
+
 TOOL_REGISTRY = {
     "search_semantic_catalog": search_semantic_catalog,
-    "describe_explore": describe_explore,
+    "get_explores": get_explores,
+    "get_dimensions": get_dimensions,
+    "get_measures": get_measures,
     "get_field_values": get_field_values,
-    "run_semantic_query": run_semantic_query,
+    "query": query,
     "get_table_schema": get_table_schema,
     "run_sql_query": run_sql_query,
 }
@@ -267,10 +341,11 @@ class AgentRunner:
 
         self.sessions[session_id] = history
 
-    def _system_prompt(self, decision, query: str) -> str:
-        """Base prompt + explores, plus runtime context: dates, data coverage and catalog search results."""
+    def _system_prompt(self, decision, question: str) -> Tuple[str, Retrieval]:
+        """Base prompt plus the per-question context: dates, data coverage and what retrieval found."""
+        instructions = semantic_layer.instructions
         prompt = AGENT_SYSTEM_PROMPT.format(
-            explores=semantic_layer.explore_overview(),
+            persona=instructions.persona.strip() or DEFAULT_PERSONA,
             raw_sql_rule=RAW_SQL_ENABLED if settings.ALLOW_RAW_SQL_FALLBACK else RAW_SQL_DISABLED,
         )
         first, last = duckdb_tool.get_data_coverage()
@@ -278,21 +353,21 @@ class AgentRunner:
         if first and last:
             context += f"\n- The data covers {first.isoformat()} to {last.isoformat()}."
 
-        # Retrieval feeds the compiler: the router's search phrase pulls the relevant fields up front,
-        # so a simple question usually needs a single run_semantic_query call.
-        search_phrase = decision.metric_search_phrase or query
-        if decision.entity_keywords:
-            search_phrase += " " + " ".join(decision.entity_keywords)
-        catalog_hits = raw_search_semantic_catalog(search_phrase)
-        context += f"\n\n### Catalog search results for this question\n{catalog_hits}"
-        return prompt + context
+        retrieval = retrieve(
+            question,
+            measure_phrase=" ".join(decision.measures),
+            dimension_phrase=" ".join(decision.dimensions),
+            filter_values=decision.filter_values,
+        )
+        context += "\n\n" + _format_retrieval(retrieval, decision)
+        return prompt + context, retrieval
 
     def run_query(self, request: QueryRequest) -> QueryResponse:
         """Route the question, let the model pick LookML fields, compile and run them, and synthesize an answer:
         1. Check the API key and reload the semantic model if the LookML changed.
         2. Classify intent and pick model, step budget and tools (IntentRouter).
-        3. Retrieve relevant explores and fields from the catalog into the prompt.
-        4. Tool-calling loop: run_semantic_query (or the raw SQL fallback) until the model answers.
+        3. Retrieve explores, fields, resolved filter values and agent instructions into the prompt.
+        4. Tool-calling loop: query (or the raw SQL fallback) until the model answers.
         """
         start_time = time.time()
 
@@ -342,8 +417,10 @@ class AgentRunner:
                     "max_iterations": max_iterations,
                     "allowed_tools": allowed_tool_names,
                     "reasoning": decision.reasoning,
-                    "metric_search_phrase": decision.metric_search_phrase,
-                    "entity_keywords": decision.entity_keywords,
+                    "measures": decision.measures,
+                    "dimensions": decision.dimensions,
+                    "filter_values": decision.filter_values,
+                    "time_period": decision.time_period,
                 },
                 thought=(
                     f"Router ({settings.GEMINI_ROUTER_MODEL}) classified intent as '{decision.intent}' "
@@ -375,7 +452,29 @@ class AgentRunner:
             self._save_session_turn(session_id, request.query, answer)
             return self._response(request, decision.intent, target_model, answer, trace, thought_steps, start_time)
 
-        messages: List[Any] = [SystemMessage(content=self._system_prompt(decision, request.query))]
+        system_prompt, retrieval = self._system_prompt(decision, request.query)
+        thought_steps.append(
+            AgentThoughtStep(
+                step_number=step_counter,
+                tool="retrieval",
+                tool_input={
+                    "measures": decision.measures,
+                    "dimensions": decision.dimensions,
+                    "filter_values": decision.filter_values,
+                },
+                tool_output={
+                    "explores": retrieval.explores,
+                    "measures": [i.id for i in retrieval.measures],
+                    "dimensions": [i.id for i in retrieval.dimensions],
+                    "filter_values": retrieval.filter_values,
+                    "glossary": [g.get("term") for g in retrieval.glossary],
+                    "golden_queries": [g["question"] for g in retrieval.golden_queries],
+                },
+                thought="Chroma retrieved explores, fields, glossary and golden queries; filter values were looked up in the data.",
+            )
+        )
+        step_counter += 1
+        messages: List[Any] = [SystemMessage(content=system_prompt)]
         if session_id and session_id in self.sessions:
             messages.extend(self.sessions[session_id])
         messages.append(HumanMessage(content=request.query))
@@ -444,19 +543,19 @@ class AgentRunner:
         if name not in allowed or name not in TOOL_REGISTRY:
             return f"Error: Tool '{name}' is not permitted for intent '{intent}'."
 
-        if name == "run_semantic_query":
+        if name == "query":
             try:
-                query = SemanticQuery(
+                semantic_query = SemanticQuery(
                     explore=args.get("explore", ""),
                     fields=args.get("fields") or [],
                     filters=args.get("filters") or {},
                     sorts=args.get("sorts") or [],
                     limit=args.get("limit") or 500,
                 )
-                result = semantic_layer.run(query)
+                result = semantic_layer.run(semantic_query)
             except (SemanticQueryError, ValueError) as e:
                 return f"Error: {e}"
-            trace.record_semantic(query, result)
+            trace.record_semantic(semantic_query, result)
             return _semantic_tool_output(result)
 
         if name == "run_sql_query":

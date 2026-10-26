@@ -151,9 +151,9 @@ Wipes the ChromaDB collection clean (`vector_store.clear()`) and forces a live r
 ### `POST /api/v1/agent/query`
 
 The primary interface for natural language analytics:
-1. The intent router classifies the question (`out_of_scope`, `capabilities`, `simple_query` with 5 steps, `complex_query` with 8 steps) and extracts a `metric_search_phrase` and `entity_keywords`.
-2. Chroma returns the most relevant explores, measures and dimensions, which go into the prompt with today's date and the data coverage.
-3. The model calls `run_semantic_query` with an explore, fields and filters; the LookML compiler writes and runs the SQL. Errors come back with suggestions so the model can correct itself.
+1. The intent router classifies the question (`out_of_scope`, `capabilities`, `simple_query` with 5 steps, `complex_query` with 8 steps) and splits it into measures, dimensions, filter values and a time period.
+2. Retrieval picks the best explores and their fields in Chroma, resolves the filter values to exact values in the data (or through the glossary), and adds relevant glossary entries and golden queries to the prompt.
+3. The model calls `query` with an explore, fields and filters; the LookML compiler writes and runs the SQL. Errors come back with suggestions so the model can correct itself.
 4. Only when no explore fits, and `ALLOW_RAW_SQL_FALLBACK=True`, the model may use read-only raw SQL; the answer then says so and `governed` is `false`.
 5. The answer leads with the number in COP and a "Metric:" line, and the response carries everything behind it.
 
@@ -198,12 +198,12 @@ Example with `AGENT_TODAY=2026-10-26` (SQL and tool outputs shortened):
       "step_number": 1,
       "tool": "intent_router",
       "tool_input": {"query": "How much did I spend last month?", "router_model": "gemini-3.1-flash-lite"},
-      "tool_output": {"intent": "simple_query", "max_iterations": 5, "metric_search_phrase": "total spend net of refunds"},
+      "tool_output": {"intent": "simple_query", "max_iterations": 5, "measures": ["total spend"], "filter_values": [], "time_period": "last month"},
       "thought": "..."
     },
     {
       "step_number": 2,
-      "tool": "run_semantic_query",
+      "tool": "query",
       "tool_input": {"explore": "fct_transactions", "fields": ["fct_transactions.total_spend_cop"], "filters": {"fct_transactions.transaction_month": "last month"}},
       "tool_output": "{\"fields\": [...], \"row_count\": 1, \"rows\": [{\"fct_transactions.total_spend_cop\": 12417133.52}]}",
       "thought": "..."

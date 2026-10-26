@@ -1,0 +1,97 @@
+# Agent instructions, modelled on a Looker Conversational Analytics data agent.
+# Chroma indexes the glossary and the golden queries; for each question the closest entries are added
+# to the prompt, so this file can grow without growing every prompt.
+#
+# Keep golden queries different from the evaluation questions in tests/golden/questions.json,
+# otherwise the live evaluation would grade the agent on answers it was shown.
+
+persona: >
+  You are Maria's personal finance analyst. Answer in short, plain sentences, in the language of the
+  question, with amounts in Colombian pesos (COP).
+
+# Business words that don't appear in the data. `field` is a dimension name without its view, so the
+# entry works in every explore that has that dimension; `value` must be an exact value of that field.
+glossary:
+  - term: eating out
+    synonyms: [dining out, restaurants, fast food, takeaway]
+    meaning: Restaurant and fast food spend
+    field: category_name
+    value: Restaurants & fast food
+  - term: coffee
+    synonyms: [cafes, bars, drinks out]
+    meaning: Spend in bars and cafes
+    field: category_name
+    value: Bar cafe
+  - term: supermarket
+    synonyms: [groceries, food shopping]
+    meaning: Grocery spend
+    field: category_name
+    value: Groceries
+  - term: taxis
+    synonyms: [cabs, ride hailing, uber rides]
+    meaning: Taxi and ride-hailing spend
+    field: category_name
+    value: Taxi
+  - term: bills
+    synonyms: [utilities, electricity, gas and water]
+    meaning: Energy and utility bills
+    field: category_name
+    value: Energy & utilities
+  - term: living expenses
+    synonyms: [cost of living, burn rate, day-to-day spend]
+    meaning: Tier 1 operational spend (routine living costs). Use the measure tier1_operational_spend_cop.
+  - term: savings
+    synonyms: [how much I saved, saving rate]
+    meaning: The default savings rate across all tiers (savings_rate_pct). Use operating_savings_rate_pct only for Tier 1.
+  - term: trip
+    synonyms: [holiday, vacation, travel project]
+    meaning: Trips are tracked with labels. Look the trip up in dim_labels.label_name in the transaction_labels explore.
+
+# Filters applied to an explore unless the question filters that field itself (Looker default filters).
+# Example: {explore: fct_transactions, field: fct_transactions.record_state, value: "reconciled"}
+default_filters: []
+
+# Verified question and query pairs, shown to the agent as examples when a question is similar.
+golden_queries:
+  - question: What did I spend on groceries in July 2026?
+    query:
+      explore: fct_transactions
+      fields: [fct_transactions.total_spend_cop]
+      filters: {dim_categories.category_name: Groceries, fct_transactions.transaction_month: "2026-07"}
+  - question: How much have I paid to Uber this year?
+    query:
+      explore: fct_transactions
+      fields: [fct_transactions.total_spend_cop]
+      filters: {fct_transactions.merchant: "%uber%", fct_transactions.transaction_year: this year}
+  - question: Compare my spend by category group in March and April 2026
+    query:
+      explore: fct_transactions
+      fields: [fct_transactions.transaction_month, dim_categories.category_group, fct_transactions.total_spend_cop]
+      filters: {fct_transactions.transaction_month: "2026-03, 2026-04"}
+  - question: Show income, spend and savings rate per month for the first half of 2026
+    query:
+      explore: mart_monthly_pnl
+      fields: [mart_monthly_pnl.pnl_month, mart_monthly_pnl.total_income_cop, mart_monthly_pnl.total_spend_cop, mart_monthly_pnl.savings_rate_pct]
+      filters: {mart_monthly_pnl.pnl_month: "2026-01 through 2026-06"}
+  - question: Which categories were over budget in August 2026?
+    query:
+      explore: mart_category_budget
+      fields: [mart_category_budget.category_name, mart_category_budget.total_spend_cop, mart_category_budget.total_budget_cap_cop]
+      filters: {mart_category_budget.budget_month: "2026-08", mart_category_budget.is_over_budget: "yes"}
+  - question: How much did the Italy trip cost?
+    query:
+      explore: transaction_labels
+      fields: [fct_transactions.total_spend_cop]
+      filters: {dim_labels.label_name: Italy}
+  - question: Top 10 merchants by spend in the second quarter of 2026
+    query:
+      explore: fct_transactions
+      fields: [fct_transactions.merchant, fct_transactions.total_spend_cop]
+      filters: {fct_transactions.transaction_quarter: "2026-Q2"}
+      sorts: [fct_transactions.total_spend_cop desc]
+      limit: 10
+  - question: How many expenses did I record last month, and what was the average ticket?
+    query:
+      explore: fct_transactions
+      fields: [fct_transactions.expense_count, fct_transactions.average_expense_ticket_cop]
+      filters: {fct_transactions.transaction_month: last month}

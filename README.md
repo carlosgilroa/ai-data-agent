@@ -29,13 +29,13 @@ flowchart TD
 
         subgraph SemanticRAG ["Semantic RAG Layer"]
             Indexer["LookML & Parquet Indexer"] --> Chroma["ChromaDB Vector Store"]
-            Chroma --> RAGTool["search_semantic_catalog (top explores & fields)"]
+            Chroma --> RAGTool["Retrieval: explores, fields, filter values, glossary, golden queries"]
         end
 
         subgraph Reasoning ["Tool-Calling Engine"]
             Runner --> LLM["Gemini (routed model) / LangChain"]
             LLM --> RAGTool
-            LLM --> SemanticTool["run_semantic_query (explore + fields + filters)"]
+            LLM --> SemanticTool["query (explore + fields + filters)"]
             LLM -.->|fallback only| RawSQL["run_sql_query (read-only, marked not governed)"]
         end
 
@@ -66,15 +66,21 @@ flowchart TD
    - Date rule: "last month" is the previous full calendar month, "this month" is the current month to date.
    - Unknown or hidden fields return an error with suggestions, so the model can correct itself.
    - Answers note when a period is only partly covered by the data.
-2. **RAG with Chroma keeps the prompt small**:
-   - The router turns the question into a search phrase, and Chroma returns only the most relevant explores, measures and dimensions (`SEMANTIC_SEARCH_TOP_K`, default 12). Input tokens stay flat as the semantic layer grows.
-   - The catalog is rebuilt automatically when any `.lkml` file changes.
-3. **Intent router**: `out_of_scope` (no tools), `capabilities` (router model), `simple_query` (simple model, 5 steps) and `complex_query` (main model, 8 steps).
-4. **Exploratory questions**: when no explore fits, the agent may run read-only raw SQL (`ALLOW_RAW_SQL_FALLBACK`). Those answers say they are not governed metrics and come back with `governed: false`.
-5. **Traceable answers**: every response carries the semantic query, the LookML fields with their definitions, the compiled SQL, the rows, coverage notes and whether the numbers are governed.
-6. **Locked-down DuckDB**: tables are loaded into memory at start, then external file access and configuration changes are disabled, so agent SQL can't read other files on the machine. Only `SELECT` and `WITH` statements run.
-7. **Golden questions**: 29 questions with hand-written reference SQL. The compiler is checked against them for free on every test run; the full agent is checked through Gemini only on demand.
-8. **Session memory**: 10-turn window per `session_id`, including the last semantic query for follow-ups.
+2. **Modelled on Looker's Conversational Analytics**:
+   - Looker-style tools: `get_explores`, `get_dimensions`, `get_measures`, `get_field_values` and `query`.
+   - Value lookup like Looker's filter suggestions: up to 100 values per field with a flag when the list is cut off, or a fuzzy search across every searchable text field. LookML decides which fields are searchable (`suggestions`, `suggest_dimension`, `suggest_explore`).
+   - Agent instructions in `agent_instructions.yaml`: persona, business glossary, default filters and golden queries.
+3. **RAG with Chroma keeps the prompt small**:
+   - The router splits the question into measures, dimensions, filter values and a time period.
+   - Chroma searches measures and dimensions separately, picks the best explores first, and keeps up to 5 measures and 5 dimensions inside them. It also retrieves the relevant glossary entries and golden queries.
+   - Filter values are resolved before the loop ("restaurants" becomes `category_name = 'Restaurants & fast food'`), so a simple question usually needs one `query` call. Input tokens stay flat as the semantic layer grows.
+   - The catalog is rebuilt automatically when any `.lkml` file or the instructions file changes.
+4. **Intent router**: `out_of_scope` (no tools), `capabilities` (router model), `simple_query` (simple model, 5 steps) and `complex_query` (main model, 8 steps).
+5. **Exploratory questions**: when no explore fits, the agent may run read-only raw SQL (`ALLOW_RAW_SQL_FALLBACK`). Those answers say they are not governed metrics and come back with `governed: false`.
+6. **Traceable answers**: every response carries the semantic query, the LookML fields with their definitions, the compiled SQL, the rows, coverage notes, whether the numbers are governed, the retrieval result and the Gemini tokens spent.
+7. **Locked-down DuckDB**: tables are loaded into memory at start, then external file access and configuration changes are disabled, so agent SQL can't read other files on the machine. Only `SELECT` and `WITH` statements run.
+8. **Golden questions**: 31 questions with hand-written reference SQL. The compiler is checked against them for free on every test run; the full agent is checked through Gemini only on demand.
+9. **Session memory**: 10-turn window per `session_id`, including the last semantic query for follow-ups.
 
 ---
 
@@ -90,7 +96,8 @@ ai-data-agent/
 │   │   ├── model.py                # Parsed LookML model: views, fields, explores, joins
 │   │   ├── compiler.py             # Semantic query to DuckDB SQL
 │   │   ├── dates.py                # Date filter expressions ("last month", "2026-Q3", ...)
-│   │   └── service.py              # Runs compiled queries, coverage notes, explore descriptions
+│   │   ├── instructions.py         # Agent instructions: glossary, default filters, golden queries
+│   │   └── service.py              # Runs queries, value lookup and search, coverage notes
 │   ├── rag/
 │   │   ├── store.py                # ChromaDB vector store & memory fallback
 │   │   └── indexer.py              # LookML & lakehouse metadata indexer
@@ -112,6 +119,7 @@ ai-data-agent/
 │   ├── test_golden_compiler.py     # Compiler vs reference SQL (free)
 │   ├── test_golden_live.py         # Agent vs reference SQL (Gemini, opt-in)
 │   └── test_agent.py, test_duckdb.py, test_indexer.py, test_schemas.py
+├── agent_instructions.yaml         # Persona, glossary, default filters, golden queries
 ├── pytest.ini                      # `live` marker, skipped by default
 ├── .env.example
 └── requirements.txt
@@ -155,7 +163,8 @@ WALLET_DATA_DIR=C:/projects/wallet/data
 LOOKML_DIR=C:/projects/wallet-lookml
 AGENT_TODAY=                  # optional fixed date for "last month" etc.
 ALLOW_RAW_SQL_FALLBACK=True
-SEMANTIC_SEARCH_TOP_K=12
+RETRIEVAL_EXPLORES=3          # explores per question, then up to 5 measures and 5 dimensions
+AGENT_INSTRUCTIONS_PATH=agent_instructions.yaml
 ```
 *(Note: A valid `GEMINI_API_KEY` is required to run the autonomous agent. If omitted or unconfigured, the endpoint explicitly returns HTTP 400 Bad Request to prevent ungrounded heuristics.)*
 

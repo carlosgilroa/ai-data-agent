@@ -48,7 +48,7 @@ def _agent_numbers(response):
     """Numbers from every semantic query the agent ran, since a comparison can take several queries."""
     rows = list(response.data or [])
     for step in response.thought_steps:
-        if step.tool == "run_semantic_query" and isinstance(step.tool_output, str):
+        if step.tool == "query" and isinstance(step.tool_output, str):
             try:
                 rows += json.loads(step.tool_output).get("rows", [])
             except (ValueError, AttributeError):
