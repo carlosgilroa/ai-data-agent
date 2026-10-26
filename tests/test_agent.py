@@ -475,11 +475,11 @@ def test_token_usage_records_each_calls_input():
 
 
 def test_prompts_name_no_dataset():
-    """The fixed prompt text names no dataset values or fields: the domain comes from the semantic layer
-    at runtime, and dataset-specific wording only from agent_instructions.yaml."""
+    """The fixed prompt text names no dataset values or fields: what the data covers comes from
+    agent_instructions.yaml (data_description), the only place for dataset-specific wording."""
     import json as _json
     from app.agent.prompts import AGENT_SYSTEM_PROMPT, DEFAULT_PERSONA, RAW_SQL_DISABLED, RAW_SQL_ENABLED
-    from app.agent.router import ROUTER_SYSTEM_PROMPT, domain_overview
+    from app.agent.router import ROUTER_SYSTEM_PROMPT, data_description
     from app.agent.runner import tool_declarations
     from app.schemas.query import RouterDecision
 
@@ -494,8 +494,24 @@ def test_prompts_name_no_dataset():
         assert f" {word}" not in fixed_text and f"'{word}" not in fixed_text and f'"{word}' not in fixed_text, word
 
     from app.semantic.service import semantic_layer
-    assert domain_overview().splitlines() == [f"- {e.label or e.name}" for e in semantic_layer.model.explores.values()]
-    assert "{domain}" in ROUTER_SYSTEM_PROMPT
+    assert "{data}" in ROUTER_SYSTEM_PROMPT
+    assert data_description() == semantic_layer.instructions.data_description.strip()
+
+
+def test_data_description_falls_back_to_explore_labels(monkeypatch):
+    """Without a data_description in the instructions, the router describes the data with the explore labels,
+    without their layer suffix such as "(Gold)"."""
+    from app.agent.router import data_description
+    from app.semantic.instructions import AgentInstructions
+    from app.semantic.service import SemanticLayer, semantic_layer
+
+    monkeypatch.setattr(SemanticLayer, "instructions", property(lambda self: AgentInstructions()))
+    text = data_description()
+    labels = [e.label for e in semantic_layer.model.explores.values() if e.label]
+    assert text.endswith(".")
+    for label in labels:
+        assert label.split(" (")[0] in text
+    assert "(Gold)" not in text and "(Silver)" not in text and "(PDT)" not in text
 
 
 def test_tool_descriptions_are_sent_once():

@@ -16,7 +16,7 @@ from app.agent.tools.rag_tool import (
     search_semantic_catalog as raw_search_semantic_catalog,
 )
 from app.agent.prompts import AGENT_SYSTEM_PROMPT, DEFAULT_PERSONA, RAW_SQL_DISABLED, RAW_SQL_ENABLED
-from app.agent.router import domain_overview, intent_router
+from app.agent.router import data_description, intent_router
 from app.agent.usage import UsageCallback, start_tracking, summarize
 from app.semantic.compiler import SemanticQuery, SemanticQueryError
 from app.semantic.service import semantic_layer
@@ -491,8 +491,7 @@ class AgentRunner:
                     content=(
                         f"{semantic_layer.instructions.persona.strip() or DEFAULT_PERSONA}\n\n"
                         "The user's question is outside the data you can answer about. Politely decline, and "
-                        "say briefly what kinds of questions you can answer, based on this data:\n"
-                        f"{domain_overview()}"
+                        f"say briefly what kinds of questions you can answer. The data you cover: {data_description()}"
                     )
                 ),
                 HumanMessage(content=request.query),

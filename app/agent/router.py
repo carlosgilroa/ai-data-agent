@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Tuple, List, Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.agent.usage import UsageCallback
@@ -19,13 +20,12 @@ SEMANTIC_TOOLS = [
 ]
 RAW_SQL_TOOLS = ["get_table_schema", "run_sql_query"]
 
-# Nothing here names the dataset: the domain comes from the explores in the semantic layer (domain_overview)
+# Nothing here names the dataset: the data comes from data_description in agent_instructions.yaml
 ROUTER_SYSTEM_PROMPT = """You route questions for a data agent that answers only from a LookML semantic layer.
-The data it can answer about (one line per explore):
-{domain}
+The data it can answer about: {data}
 
 1. Classify the user's message into one intent:
-   - "out_of_scope": unrelated to the data above.
+   - "out_of_scope": unrelated to that data.
    - "capabilities": asks what the agent can do, how it works, or what data or tools it has.
    - "simple_query": one or a few measures, optionally filtered, for one period or broken down by one dimension.
    - "complex_query": needs several steps or queries: comparisons between periods or groups, ratios across explores, diagnosing a change, or open-ended exploration.
@@ -40,11 +40,17 @@ The data it can answer about (one line per explore):
 """
 
 
-def domain_overview() -> str:
-    """What the agent can answer about, from the explores' LookML labels (so no dataset is hardcoded)."""
+def data_description() -> str:
+    """What the agent can answer about: `data_description` from agent_instructions.yaml (like a Looker data
+    agent's description), or else the explores' LookML labels without their layer suffix, e.g. "(Gold)".
+    """
     from app.semantic.service import semantic_layer
 
-    return "\n".join(f"- {e.label or e.name}" for e in semantic_layer.model.explores.values())
+    described = semantic_layer.instructions.data_description.strip()
+    if described:
+        return described
+    labels = [re.sub(r"\s*\([^)]*\)\s*$", "", e.label or e.name) for e in semantic_layer.model.explores.values()]
+    return "; ".join(dict.fromkeys(label for label in labels if label)) + "."
 
 
 class IntentRouter:
@@ -100,7 +106,7 @@ class IntentRouter:
             else ""
         )
         messages = [
-            SystemMessage(content=ROUTER_SYSTEM_PROMPT.format(domain=domain_overview()) + context_hint),
+            SystemMessage(content=ROUTER_SYSTEM_PROMPT.format(data=data_description()) + context_hint),
             HumanMessage(content=query),
         ]
 

@@ -49,6 +49,8 @@ class GoldenQuery(BaseModel):
 
 class AgentInstructions(BaseModel):
     persona: str = ""
+    # One or two sentences on what the data covers; the router uses it to tell in-scope questions from others
+    data_description: str = ""
     glossary: List[GlossaryEntry] = Field(default_factory=list)
     default_filters: List[DefaultFilter] = Field(default_factory=list)
     golden_queries: List[GoldenQuery] = Field(default_factory=list)

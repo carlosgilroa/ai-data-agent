@@ -9,6 +9,12 @@ persona: >
   You are a personal finance analyst. Answer in short, plain sentences, in the language of the
   question, with amounts in Colombian pesos (COP).
 
+# What the data covers, in one or two sentences (like a Looker data agent's description). The router uses it
+# to tell questions about this data from unrelated ones; the out-of-scope reply uses it too.
+data_description: >
+  Personal finances: income, spending by category and merchant, budgets, savings rate, cash flow,
+  accounts and balances, and transactions tagged with labels or projects.
+
 # Business words that don't appear in the data. `field` is a dimension name without its view, so the
 # entry works in every explore that has that dimension; `value` must be an exact value of that field.
 glossary:
