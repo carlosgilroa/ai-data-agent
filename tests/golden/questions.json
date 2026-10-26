@@ -1,0 +1,421 @@
+{
+  "about": "Golden questions for the agent. Each has the semantic query a correct answer uses and an independent hand-written reference SQL over the raw tables (no LookML). Free tests (pytest) check that the compiler matches the reference; live tests (pytest -m live) send the question to the agent through Gemini. Relative dates assume today = 2026-10-26.",
+  "today": "2026-10-26",
+  "questions": [
+    {
+      "id": "spend_sep",
+      "question": "How much did I spend in September 2026?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "fct_transactions.transaction_month": "2026-09"
+        }
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) FROM master_records WHERE STRFTIME(CAST(date AS DATE), '%Y-%m') = '2026-09'"
+    },
+    {
+      "id": "income_sep",
+      "question": "What was my income in September 2026?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.total_income_cop"
+        ],
+        "filters": {
+          "fct_transactions.transaction_month": "2026-09"
+        }
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operating_income','tier2_capital_inflow') THEN amount ELSE 0 END) FROM master_records WHERE STRFTIME(CAST(date AS DATE), '%Y-%m') = '2026-09'"
+    },
+    {
+      "id": "savings_rate_sep",
+      "question": "What was my savings rate in September 2026?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.savings_rate_pct"
+        ],
+        "filters": {
+          "fct_transactions.transaction_month": "2026-09"
+        }
+      },
+      "reference_sql": "SELECT (SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operating_income','tier2_capital_inflow') THEN amount ELSE 0 END) - (SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END))) / NULLIF(SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operating_income','tier2_capital_inflow') THEN amount ELSE 0 END), 0) * 100 FROM master_records WHERE STRFTIME(CAST(date AS DATE), '%Y-%m') = '2026-09'"
+    },
+    {
+      "id": "spend_last_month",
+      "question": "How much did I spend last month?",
+      "semantic_query": {
+        "explore": "mart_monthly_pnl",
+        "fields": [
+          "mart_monthly_pnl.total_spend_cop"
+        ],
+        "filters": {
+          "mart_monthly_pnl.pnl_month": "last month"
+        }
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) FROM master_records WHERE STRFTIME(CAST(date AS DATE), '%Y-%m') = '2026-09'"
+    },
+    {
+      "id": "spend_this_month",
+      "question": "How much have I spent this month?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "fct_transactions.transaction_date": "this month"
+        }
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) FROM master_records WHERE CAST(date AS DATE) BETWEEN DATE '2026-10-01' AND DATE '2026-10-26'"
+    },
+    {
+      "id": "spend_ytd",
+      "question": "How much have I spent this year?",
+      "semantic_query": {
+        "explore": "mart_monthly_pnl",
+        "fields": [
+          "mart_monthly_pnl.total_spend_cop"
+        ],
+        "filters": {
+          "mart_monthly_pnl.pnl_year": "this year"
+        }
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) FROM master_records WHERE YEAR(CAST(date AS DATE)) = 2026"
+    },
+    {
+      "id": "savings_rate_ytd",
+      "question": "What is my savings rate this year?",
+      "semantic_query": {
+        "explore": "mart_monthly_pnl",
+        "fields": [
+          "mart_monthly_pnl.savings_rate_pct"
+        ],
+        "filters": {
+          "mart_monthly_pnl.pnl_year": "2026"
+        }
+      },
+      "reference_sql": "SELECT (SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operating_income','tier2_capital_inflow') THEN amount ELSE 0 END) - (SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END))) / NULLIF(SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operating_income','tier2_capital_inflow') THEN amount ELSE 0 END), 0) * 100 FROM master_records WHERE YEAR(CAST(date AS DATE)) = 2026"
+    },
+    {
+      "id": "tier1_oct",
+      "question": "What was my Tier 1 (living) spend in October 2026?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.tier1_operational_spend_cop"
+        ],
+        "filters": {
+          "fct_transactions.transaction_month": "2026-10"
+        }
+      },
+      "reference_sql": "SELECT SUM(ABS(amount)) FROM master_records WHERE NOT is_transfer AND nature = 'tier1_operational_cost' AND STRFTIME(CAST(date AS DATE), '%Y-%m') = '2026-10'"
+    },
+    {
+      "id": "operating_savings_rate_ytd",
+      "question": "What is my Tier 1 operating savings rate this year?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.operating_savings_rate_pct"
+        ],
+        "filters": {
+          "fct_transactions.transaction_year": "2026"
+        }
+      },
+      "reference_sql": "SELECT (SUM(CASE WHEN NOT is_transfer AND nature='tier1_operating_income' THEN amount ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature='tier1_operational_cost' THEN ABS(amount) ELSE 0 END)) / NULLIF(SUM(CASE WHEN NOT is_transfer AND nature='tier1_operating_income' THEN amount ELSE 0 END), 0) * 100 FROM master_records WHERE YEAR(CAST(date AS DATE)) = 2026"
+    },
+    {
+      "id": "spend_by_group_sep",
+      "question": "What did I spend by category group in September 2026?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "dim_categories.category_group",
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "fct_transactions.transaction_month": "2026-09"
+        }
+      },
+      "reference_sql": "SELECT c.category_group, SUM(CASE WHEN NOT t.is_transfer AND t.nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(t.amount) ELSE 0 END) - SUM(CASE WHEN NOT t.is_transfer AND t.nature = 'tier2_refund_offset' THEN t.amount ELSE 0 END) FROM master_records t LEFT JOIN dim_categories c ON t.category_id = c.category_id WHERE STRFTIME(CAST(t.date AS DATE), '%Y-%m') = '2026-09' GROUP BY 1"
+    },
+    {
+      "id": "travel_transport",
+      "question": "How much have I spent on Travel Transport?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "dim_categories.category_name": "Travel Transport"
+        }
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT t.is_transfer AND t.nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(t.amount) ELSE 0 END) - SUM(CASE WHEN NOT t.is_transfer AND t.nature = 'tier2_refund_offset' THEN t.amount ELSE 0 END) FROM master_records t JOIN dim_categories c ON t.category_id = c.category_id WHERE c.category_name = 'Travel Transport'"
+    },
+    {
+      "id": "eurotrip_spend",
+      "question": "How much did the Eurotrip26 trip cost?",
+      "semantic_query": {
+        "explore": "transaction_labels",
+        "fields": [
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "dim_labels.label_name": "Eurotrip26"
+        }
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) FROM master_records WHERE id IN (SELECT b.transaction_id FROM bridge_transaction_labels b JOIN dim_labels l ON b.label_id = l.label_id WHERE l.label_name = 'Eurotrip26')"
+    },
+    {
+      "id": "label_with_comma",
+      "question": "How much did I spend under the label 'Gastos, Entretenimiento y Viajes'?",
+      "semantic_query": {
+        "explore": "transaction_labels",
+        "fields": [
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "dim_labels.label_name": "Gastos^, Entretenimiento y Viajes"
+        }
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) FROM master_records WHERE id IN (SELECT b.transaction_id FROM bridge_transaction_labels b JOIN dim_labels l ON b.label_id = l.label_id WHERE l.label_name = 'Gastos, Entretenimiento y Viajes')"
+    },
+    {
+      "id": "labelled_spend_total",
+      "question": "How much have I spent on transactions that carry any label?",
+      "semantic_query": {
+        "explore": "transaction_labels",
+        "fields": [
+          "fct_transactions.total_spend_cop"
+        ]
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) FROM master_records WHERE id IN (SELECT b.transaction_id FROM bridge_transaction_labels b JOIN dim_labels l ON b.label_id = l.label_id)"
+    },
+    {
+      "id": "spend_by_label",
+      "question": "How much did I spend per label?",
+      "semantic_query": {
+        "explore": "transaction_labels",
+        "fields": [
+          "dim_labels.label_name",
+          "fct_transactions.total_spend_cop"
+        ]
+      },
+      "reference_sql": "SELECT l.label_name, SUM(CASE WHEN NOT t.is_transfer AND t.nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(t.amount) ELSE 0 END) - SUM(CASE WHEN NOT t.is_transfer AND t.nature = 'tier2_refund_offset' THEN t.amount ELSE 0 END) FROM bridge_transaction_labels b JOIN master_records t ON b.transaction_id = t.id JOIN dim_labels l ON b.label_id = l.label_id GROUP BY 1"
+    },
+    {
+      "id": "over_budget_oct",
+      "question": "Which categories were over budget in October 2026?",
+      "semantic_query": {
+        "explore": "mart_category_budget",
+        "fields": [
+          "mart_category_budget.category_name"
+        ],
+        "filters": {
+          "mart_category_budget.budget_month": "2026-10",
+          "mart_category_budget.is_over_budget": "yes"
+        }
+      },
+      "reference_sql": "SELECT category_name FROM mart_category_budget WHERE year_month = '2026-10' AND budget_status = 'Exceeded' GROUP BY 1"
+    },
+    {
+      "id": "over_budget_count_ytd",
+      "question": "How many times did a category go over budget this year?",
+      "semantic_query": {
+        "explore": "mart_category_budget",
+        "fields": [
+          "mart_category_budget.categories_over_budget"
+        ],
+        "filters": {
+          "mart_category_budget.budget_year": "this year"
+        }
+      },
+      "reference_sql": "SELECT COUNT(*) FROM mart_category_budget WHERE year_month LIKE '2026-%' AND budget_status = 'Exceeded'"
+    },
+    {
+      "id": "restaurants_budget_oct",
+      "question": "How did restaurants spend compare with its budget in October 2026?",
+      "semantic_query": {
+        "explore": "mart_category_budget",
+        "fields": [
+          "mart_category_budget.total_spend_cop",
+          "mart_category_budget.total_budget_cap_cop"
+        ],
+        "filters": {
+          "mart_category_budget.budget_month": "2026-10",
+          "mart_category_budget.category_name": "Restaurants & fast food"
+        }
+      },
+      "reference_sql": "SELECT SUM(net_spent), SUM(recommended_budget_cap) FROM mart_category_budget WHERE year_month = '2026-10' AND category_name = 'Restaurants & fast food'"
+    },
+    {
+      "id": "monthly_spend_trend",
+      "question": "Show my spend per month this year.",
+      "semantic_query": {
+        "explore": "mart_monthly_pnl",
+        "fields": [
+          "mart_monthly_pnl.pnl_month",
+          "mart_monthly_pnl.total_spend_cop"
+        ],
+        "filters": {
+          "mart_monthly_pnl.pnl_year": "2026"
+        }
+      },
+      "reference_sql": "SELECT STRFTIME(CAST(date AS DATE), '%Y-%m'), SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) FROM master_records WHERE YEAR(CAST(date AS DATE)) = 2026 GROUP BY 1"
+    },
+    {
+      "id": "spend_q3",
+      "question": "How much did I spend in Q3 2026?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "fct_transactions.transaction_quarter": "2026-Q3"
+        }
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) FROM master_records WHERE CAST(date AS DATE) >= DATE '2026-07-01' AND CAST(date AS DATE) < DATE '2026-10-01'"
+    },
+    {
+      "id": "aug_vs_sep",
+      "question": "Compare my spend in August and September 2026.",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.transaction_month",
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "fct_transactions.transaction_month": "2026-08, 2026-09"
+        }
+      },
+      "reference_sql": "SELECT STRFTIME(CAST(date AS DATE), '%Y-%m'), SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) FROM master_records WHERE STRFTIME(CAST(date AS DATE), '%Y-%m') IN ('2026-08','2026-09') GROUP BY 1"
+    },
+    {
+      "id": "last_month_vs_last_year",
+      "question": "How was last month's spend compared with the same month last year?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.transaction_month",
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "fct_transactions.transaction_month": "last month, 2025-09"
+        }
+      },
+      "reference_sql": "SELECT STRFTIME(CAST(date AS DATE), '%Y-%m'), SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) FROM master_records WHERE STRFTIME(CAST(date AS DATE), '%Y-%m') IN ('2026-09','2025-09') GROUP BY 1"
+    },
+    {
+      "id": "top_merchants_sep",
+      "question": "Who were my top 5 merchants by spend in September 2026?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.merchant",
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "fct_transactions.transaction_month": "2026-09"
+        },
+        "sorts": [
+          "fct_transactions.total_spend_cop desc"
+        ],
+        "limit": 5
+      },
+      "reference_sql": "SELECT merchant, SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) AS s FROM master_records WHERE STRFTIME(CAST(date AS DATE), '%Y-%m') = '2026-09' GROUP BY 1 ORDER BY s DESC NULLS LAST LIMIT 5"
+    },
+    {
+      "id": "expense_count_sep",
+      "question": "How many expenses did I have in September 2026?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.expense_count"
+        ],
+        "filters": {
+          "fct_transactions.transaction_month": "2026-09"
+        }
+      },
+      "reference_sql": "SELECT COUNT(*) FROM master_records WHERE NOT is_transfer AND type = 'expense' AND nature IN ('tier1_operational_cost','tier2_capital_outlay') AND STRFTIME(CAST(date AS DATE), '%Y-%m') = '2026-09'"
+    },
+    {
+      "id": "avg_ticket_ytd",
+      "question": "What is my average expense ticket this year?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.average_expense_ticket_cop"
+        ],
+        "filters": {
+          "fct_transactions.transaction_year": "this year"
+        }
+      },
+      "reference_sql": "SELECT AVG(ABS(amount)) FROM master_records WHERE NOT is_transfer AND type = 'expense' AND nature IN ('tier1_operational_cost','tier2_capital_outlay') AND YEAR(CAST(date AS DATE)) = 2026"
+    },
+    {
+      "id": "refunds_ytd",
+      "question": "How much did I get back in refunds this year?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.total_refunds_cop"
+        ],
+        "filters": {
+          "fct_transactions.transaction_year": "2026"
+        }
+      },
+      "reference_sql": "SELECT SUM(amount) FROM master_records WHERE NOT is_transfer AND nature = 'tier2_refund_offset' AND YEAR(CAST(date AS DATE)) = 2026"
+    },
+    {
+      "id": "balance_active_accounts",
+      "question": "What is the total balance of my active accounts?",
+      "semantic_query": {
+        "explore": "dim_accounts",
+        "fields": [
+          "dim_accounts.total_current_balance_cop"
+        ]
+      },
+      "reference_sql": "SELECT SUM(current_balance_cop) FROM dim_accounts WHERE is_active"
+    },
+    {
+      "id": "eur_spend",
+      "question": "How much did I spend in transactions paid in euros?",
+      "semantic_query": {
+        "explore": "fct_transactions",
+        "fields": [
+          "fct_transactions.total_spend_cop"
+        ],
+        "filters": {
+          "fct_transactions.original_currency": "EUR"
+        }
+      },
+      "reference_sql": "SELECT SUM(CASE WHEN NOT is_transfer AND nature IN ('tier1_operational_cost','tier2_capital_outlay') THEN ABS(amount) ELSE 0 END) - SUM(CASE WHEN NOT is_transfer AND nature = 'tier2_refund_offset' THEN amount ELSE 0 END) FROM master_records WHERE currency = 'EUR'"
+    },
+    {
+      "id": "biggest_increase_sep",
+      "question": "Which category's spend grew the most from August to September 2026?",
+      "semantic_query": {
+        "explore": "pdt_category_mom_velocity",
+        "fields": [
+          "pdt_category_mom_velocity.category_name",
+          "pdt_category_mom_velocity.mom_delta_cop"
+        ],
+        "filters": {
+          "pdt_category_mom_velocity.velocity_month": "2026-09"
+        },
+        "sorts": [
+          "pdt_category_mom_velocity.mom_delta_cop desc"
+        ],
+        "limit": 1
+      },
+      "reference_sql": "WITH s AS (SELECT c.category_name, STRFTIME(CAST(t.date AS DATE), '%Y-%m') AS ym, SUM(CASE WHEN t.nature = 'tier2_refund_offset' THEN -t.amount ELSE ABS(t.amount) END) AS v FROM master_records t LEFT JOIN dim_categories c ON t.category_id = c.category_id WHERE NOT t.is_transfer AND t.nature IN ('tier1_operational_cost','tier2_capital_outlay','tier2_refund_offset') AND NOT (t.nature = 'tier2_refund_offset' AND COALESCE(c.category_group, '') = 'Income') GROUP BY 1, 2) SELECT COALESCE(sep.category_name, aug.category_name), COALESCE(sep.v, 0) - COALESCE(aug.v, 0) AS d FROM (SELECT * FROM s WHERE ym = '2026-09') sep FULL OUTER JOIN (SELECT * FROM s WHERE ym = '2026-08') aug ON sep.category_name = aug.category_name WHERE aug.category_name IS NOT NULL ORDER BY d DESC LIMIT 1"
+    }
+  ]
+}
