@@ -4,7 +4,7 @@
 [![DuckDB](https://img.shields.io/badge/DuckDB-In--Process-FFF000.svg?logo=duckdb&logoColor=black)](https://duckdb.org)
 [![ChromaDB](https://img.shields.io/badge/ChromaDB-Vector_Store-FF6F00.svg)](https://www.trychroma.com)
 [![LangChain](https://img.shields.io/badge/LangChain-Orchestration-1C3C3C.svg)](https://python.langchain.com)
-[![Gemini](https://img.shields.io/badge/Gemini_1.5_Flash-Free_Tier-4285F4.svg?logo=google&logoColor=white)](https://ai.google.dev)
+[![Gemini](https://img.shields.io/badge/Gemini-Flash-4285F4.svg?logo=google&logoColor=white)](https://ai.google.dev)
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org/)
 
 An enterprise-grade, AI-native semantic query agent and RAG microservice built with **FastAPI**, **LangChain**, **ChromaDB**, and **DuckDB**. 
@@ -15,67 +15,66 @@ The microservice bridges verified **LookML semantic definitions** (from [wallet-
 
 ## Architecture Overview
 
+The model never writes metric SQL. It picks an explore, fields and filters from the LookML
+semantic layer, and a deterministic compiler turns that choice into DuckDB SQL. The same
+question always produces the same SQL, and every number uses the official LookML definition.
+
 ```mermaid
 flowchart TD
     User["User / Client (REST / Curl / Frontend)"] -->|POST /api/v1/agent/query| FastAPI["FastAPI Application (Uvicorn)"]
-    
+
     subgraph Microservice ["AI Data Agent Service"]
-        FastAPI --> Router["API Router (/api/v1)"]
-        Router --> Runner["Agent Runner (Orchestrator)"]
-        
+        FastAPI --> Runner["Agent Runner (Orchestrator)"]
+        Runner --> Router["Intent Router (flash-lite)"]
+
         subgraph SemanticRAG ["Semantic RAG Layer"]
             Indexer["LookML & Parquet Indexer"] --> Chroma["ChromaDB Vector Store"]
-            Chroma --> RAGTool["RAG Tool (search_data_catalog)"]
+            Chroma --> RAGTool["search_semantic_catalog (top explores & fields)"]
         end
-        
+
         subgraph Reasoning ["Tool-Calling Engine"]
-            Runner --> LLM["Gemini 1.5 Flash (Free Tier) / LangChain"]
+            Runner --> LLM["Gemini (routed model) / LangChain"]
             LLM --> RAGTool
-            LLM --> DuckDBTool["Safe DuckDB SQL Tool (run_sql_query)"]
+            LLM --> SemanticTool["run_semantic_query (explore + fields + filters)"]
+            LLM -.->|fallback only| RawSQL["run_sql_query (read-only, marked not governed)"]
         end
-        
-        subgraph StorageEngine ["Local Parquet Lakehouse Engine"]
-            DuckDBTool --> DuckDB["DuckDB In-Memory Engine"]
-            DuckDB --> MasterRecords["silver/master_records.parquet"]
-            DuckDB --> DimTables["silver/dim_accounts | dim_categories | dim_labels"]
-            DuckDB --> FXRates["silver/fx_rates.parquet"]
-            DuckDB --> GoldMarts["gold/mart_monthly_pnl | mart_expense_summary"]
-            DuckDB --> LookMLPDT["LookML PDT: pdt_category_mom_velocity"]
+
+        subgraph SemanticLayer ["LookML Semantic Layer"]
+            SemanticTool --> Compiler["LookML to SQL Compiler"]
+            Compiler --> Model["Parsed LookML model (views, explores, joins)"]
+        end
+
+        subgraph StorageEngine ["Local Parquet Lakehouse (DuckDB, file access locked)"]
+            Compiler --> DuckDB["DuckDB In-Memory Engine"]
+            RawSQL --> DuckDB
+            DuckDB --> Tables["Every table referenced by the LookML (silver and gold)"]
         end
     end
 
-    Runner -->|Synthesized Answer + SQL + Traceability| User
+    Runner -->|Answer + metric + semantic query + SQL + notes| User
 ```
 
 ---
 
 ## Key Features
 
-1. **Two-Step Intent Router & Autonomous ReAct Loop**:
-   - Classifies incoming queries via `gemini-3.1-flash-lite` into `out_of_scope` (`0` steps), `capabilities` (`2` steps on `gemini-3.1-flash-lite`), `simple_query` (`6` steps on `gemini-3.5-flash-lite`), or `complex_query` (`8` steps on `gemini-3.8-flash`).
-   - Performs **Zero-Cost Semantic Query Decomposition**: extracts an enriched `metric_search_phrase` (dense vector search phrase) and `entity_keywords` (dimension filters) alongside the routing classification with zero extra API latency.
-   - Binds discrete modular semantic tools (`search_data_catalog`, `get_table_schema`, `get_dimension_values`, `run_sql_query`) directly to the routed Gemini model with unrestricted multi-step introspection.
-   - Dynamically injects a **Lakehouse Context Envelope** (recorded date bounds from DuckDB + semantic decomposition hints) into runtime system context for zero-shot temporal anchoring without hardcoded dates.
-   - Minimalist zero-shot system prompt without hardcoded schemas or tools; uses native API tool-binding schema definitions and strict financial grounding against hallucinations.
-   - Provides explicit error feedback (`400 Bad Request`) when `GEMINI_API_KEY` is missing, eliminating brittle heuristics.
-2. **Multi-Turn Conversational Session Memory & Observability**:
-   - Preserves dialogue history keyed by `session_id` using a 10-turn (20-message) sliding context window.
-   - Session inspection endpoint (`GET /api/v1/agent/session/{session_id}`) for live dialogue review.
-   - Session reset endpoint (`DELETE /api/v1/agent/session/{session_id}`) for clearing conversation state.
-   - Real-time structured request/response logging for query and answer observability.
-3. **Resilient Pure-Python DuckDB Lakehouse Execution**:
-   - In-process execution directly against local Parquet files, executing queries in **<10 ms**.
-   - Native row serialization without pandas dependency, ensuring maximum speed and zero environment conflicts.
-4. **LookML as Single Source of Truth & Cosine Similarity Filtering**:
-   - Wipes ChromaDB clean (`vector_store.clear()`) on every re-index and uses the native `lkml` parser to extract measures (with `filters__all` and aggregation wrappers), dimensions, `dimension_groups`, `CASE` statements, derived tables (`pdt_category_mom_velocity`), explores, and joins from `projects/wallet-lookml`.
-   - Maps LookML `sql_table_name` definitions directly (via `_strip_lookml_table_macro`) to the 7 physical Parquet lakehouse tables (`master_records`, `dim_accounts`, `dim_categories`, `dim_labels`, `fx_rates`, `mart_monthly_pnl`, `mart_expense_summary`) without hardcoded view-resolution heuristics.
-   - Computes cosine similarity (`1 - distance`), filters out low-relevance noise using an absolute noise floor (`0.20`) and dynamic 80% relative threshold, with decoupled on-demand schema inspection via `get_table_schema` and categorical entity resolution via `get_dimension_values`.
-5. **Safe AST-Guarded SQL Execution**:
-   - Strict read-only enforcement allowing only `SELECT` and `WITH` statements.
-   - Regex-based AST safety blocking mutation keywords (`DROP`, `DELETE`, `INSERT`, `ALTER`, `ATTACH`).
-6. **Pydantic v2 Type-Safe Schemas & Interactive Swagger**:
-   - End-to-end data contracts for `QueryRequest`, `QueryResponse`, `AgentThoughtStep`, and `CatalogItem`.
-   - Auto-generated interactive API docs accessible out-of-the-box at `/docs`.
+1. **LookML to SQL compiler** (`app/semantic/`):
+   - Parses views, explores, joins, dimension groups, measure filters and derived tables with `lkml`.
+   - Compiles `{explore, fields, filters, sorts, limit}` into DuckDB SQL, joining only the views it needs.
+   - Uses symmetric aggregates when a join fans out rows, so sums are never double counted.
+   - Looker-style filters: `Groceries,Rent`, `-Rent`, `%uber%`, `^,` to escape a comma, `yes`/`no`, `>1000000`, `[100,500]`, and dates such as `2026-09`, `2026-Q3`, `2026-01 through 2026-03`, `last month`, `this year`, `last 3 months`.
+   - Date rule: "last month" is the previous full calendar month, "this month" is the current month to date.
+   - Unknown or hidden fields return an error with suggestions, so the model can correct itself.
+   - Answers note when a period is only partly covered by the data.
+2. **RAG with Chroma keeps the prompt small**:
+   - The router turns the question into a search phrase, and Chroma returns only the most relevant explores, measures and dimensions (`SEMANTIC_SEARCH_TOP_K`, default 12). Input tokens stay flat as the semantic layer grows.
+   - The catalog is rebuilt automatically when any `.lkml` file changes.
+3. **Intent router**: `out_of_scope` (no tools), `capabilities` (router model), `simple_query` (simple model, 5 steps) and `complex_query` (main model, 8 steps).
+4. **Exploratory questions**: when no explore fits, the agent may run read-only raw SQL (`ALLOW_RAW_SQL_FALLBACK`). Those answers say they are not governed metrics and come back with `governed: false`.
+5. **Traceable answers**: every response carries the semantic query, the LookML fields with their definitions, the compiled SQL, the rows, coverage notes and whether the numbers are governed.
+6. **Locked-down DuckDB**: tables are loaded into memory at start, then external file access and configuration changes are disabled, so agent SQL can't read other files on the machine. Only `SELECT` and `WITH` statements run.
+7. **Golden questions**: 29 questions with hand-written reference SQL. The compiler is checked against them for free on every test run; the full agent is checked through Gemini only on demand.
+8. **Session memory**: 10-turn window per `session_id`, including the last semantic query for follow-ups.
 
 ---
 
@@ -85,47 +84,37 @@ flowchart TD
 ai-data-agent/
 ├── app/
 │   ├── main.py                     # FastAPI application entrypoint & lifespan
-│   ├── core/
-│   │   ├── config.py               # Pydantic BaseSettings environment config
-│   ├── schemas/
-│   │   ├── catalog.py              # Pydantic models for semantic catalog
-│   │   └── query.py                # Pydantic models for queries & thought steps
+│   ├── core/config.py              # Pydantic BaseSettings environment config
+│   ├── schemas/                    # Pydantic models (catalog, query, response)
+│   ├── semantic/
+│   │   ├── model.py                # Parsed LookML model: views, fields, explores, joins
+│   │   ├── compiler.py             # Semantic query to DuckDB SQL
+│   │   ├── dates.py                # Date filter expressions ("last month", "2026-Q3", ...)
+│   │   └── service.py              # Runs compiled queries, coverage notes, explore descriptions
 │   ├── rag/
-│   │   ├── store.py                # ChromaDB vector store manager & memory fallback
-│   │   └── indexer.py              # LookML & Lakehouse metadata extractor
+│   │   ├── store.py                # ChromaDB vector store & memory fallback
+│   │   └── indexer.py              # LookML & lakehouse metadata indexer
 │   ├── agent/
-│   │   ├── prompts.py              # Minimalist system prompt (no static schemas)
-│   │   ├── router.py               # Two-step IntentRouter (gemini-3.1-flash-lite)
-│   │   ├── runner.py               # Agent orchestrator with routed ReAct loop & session memory
+│   │   ├── prompts.py              # System prompt (explores, filter grammar, answer format)
+│   │   ├── router.py               # Intent router
+│   │   ├── runner.py               # Tool-calling loop, answer trace & session memory
 │   │   └── tools/
-│   │       ├── duckdb_tool.py      # Read-only DuckDB SQL engine over Parquets
-│   │       └── rag_tool.py         # Semantic catalog search tool
-│   └── api/
-│       └── v1/
-│           ├── router.py           # API v1 router
-│           └── endpoints/
-│               ├── health.py       # Lakehouse and vector store health check
-│               ├── catalog.py      # Semantic catalog endpoints
-│               └── agent.py        # Natural language query, session inspect/reset & direct SQL
-├── docs/                           # Dedicated architecture & API documentation
-│   ├── README.md                   # Documentation hub & sitemap
-│   ├── api/
-│   │   └── endpoints_reference.md  # Detailed REST endpoints & contracts
-│   └── architecture/
-│       ├── agent_architecture.md   # Autonomous ReAct loop, session memory & SQL safety
-│       └── semantic_rag_indexer.md # LookML AST parser, views/models/joins & ChromaDB RAG
-├── scripts/
-│   ├── run_indexer.py              # CLI indexer test runner
-│   └── run_dev.ps1                 # PowerShell venv setup & uvicorn dev runner
+│   │       ├── duckdb_tool.py      # Locked-down DuckDB engine over Parquet
+│   │       └── rag_tool.py         # Semantic catalog search
+│   └── api/v1/endpoints/
+│       ├── health.py, catalog.py   # Health & catalog
+│       ├── agent.py                # Natural language query, sessions & direct SQL
+│       └── semantic.py             # Direct semantic queries (no LLM)
+├── docs/                           # Architecture & API documentation
+├── scripts/run_indexer.py          # CLI indexer
 ├── tests/
-│   ├── test_agent.py               # Unit tests for ReAct runner, tools & session memory
-│   ├── test_duckdb.py              # Unit tests for DuckDB engine & safety guards
-│   ├── test_schemas.py             # Unit tests for Pydantic data models
-│   └── test_indexer.py             # Unit tests for LookML RAG indexing
-├── .env.example                    # Environment template
-├── .gitignore                      # Python & cache ignore rules
-├── requirements.txt                # Production and development dependencies
-└── README.md                       # Architecture & documentation
+│   ├── golden/questions.json       # Golden questions with reference SQL
+│   ├── test_golden_compiler.py     # Compiler vs reference SQL (free)
+│   ├── test_golden_live.py         # Agent vs reference SQL (Gemini, opt-in)
+│   └── test_agent.py, test_duckdb.py, test_indexer.py, test_schemas.py
+├── pytest.ini                      # `live` marker, skipped by default
+├── .env.example
+└── requirements.txt
 ```
 
 ---
@@ -164,6 +153,9 @@ RAG_TOP_K=5
 RAG_MIN_SIMILARITY=0.28
 WALLET_DATA_DIR=C:/projects/wallet/data
 LOOKML_DIR=C:/projects/wallet-lookml
+AGENT_TODAY=                  # optional fixed date for "last month" etc.
+ALLOW_RAW_SQL_FALLBACK=True
+SEMANTIC_SEARCH_TOP_K=12
 ```
 *(Note: A valid `GEMINI_API_KEY` is required to run the autonomous agent. If omitted or unconfigured, the endpoint explicitly returns HTTP 400 Bad Request to prevent ungrounded heuristics.)*
 
@@ -184,7 +176,9 @@ Open **[http://localhost:8000/docs](http://localhost:8000/docs)** to test the in
 ### 5. Run Test Suite
 
 ```bash
-python -m pytest tests -v
+python -m pytest            # free: unit tests + golden compiler checks, no Gemini calls
+python -m pytest -m live    # spends Gemini credits: the agent answers the golden questions
+GOLDEN_IDS=spend_sep,aug_vs_sep python -m pytest -m live   # only some golden questions
 ```
 
 ---
@@ -214,48 +208,45 @@ python -m pytest tests -v
 ```
 
 ### 2. Semantic Catalog Search
-`GET /api/v1/catalog/search?q=operational+burn+rate`
-Returns matching LookML metrics, such as `tier1_operational_spend_usd` and associated SQL formulas.
+`GET /api/v1/catalog/search?q=total+spend`
+Returns matching LookML explores, measures and dimensions.
 
-### 3. Agent Query
-`POST /api/v1/agent/query`
+### 3. Semantic Query (no LLM, free)
+`POST /api/v1/semantic/query`
 ```json
 {
-  "query": "What is my net cashflow and savings rate by month?",
-  "explain": true
+  "explore": "fct_transactions",
+  "fields": ["fct_transactions.total_spend_cop"],
+  "filters": {"fct_transactions.transaction_month": "last month"}
 }
 ```
-**Response**:
+Returns the rows, the compiled SQL, the field definitions and coverage notes.
+`GET /api/v1/semantic/explores` lists explores and `GET /api/v1/semantic/explores/{explore}` lists an explore's fields.
+
+### 4. Agent Query
+`POST /api/v1/agent/query`
+```json
+{ "query": "How much did I spend last month?", "explain": true }
+```
+**Response** (shortened, with `AGENT_TODAY=2026-10-26`):
 ```json
 {
-  "query": "What is my net cashflow and savings rate by month?",
-  "answer": "Based on reconciled monthly P&L records (via LookML mart_monthly_pnl):\n- Latest Month (2026-09): Net Cash Flow was -8,926,969.00 with a savings rate of -308.6%.\n- Total operating income was 1,351,550.00 against operational expenses of 5,522,875.06.",
-  "sql": "SELECT year_month, operating_income, operational_expenses, net_cashflow, savings_rate_pct FROM mart_monthly_pnl ORDER BY year_month ASC LIMIT 12;",
-  "data": [
-    {
-      "year_month": "2026-01",
-      "operating_income": 12850000.0,
-      "operational_expenses": 3482100.0,
-      "net_cashflow": 9367900.0,
-      "savings_rate_pct": 72.9
-    }
+  "query": "How much did I spend last month?",
+  "intent": "simple_query",
+  "answer": "You spent 12,417,134 COP in September 2026.\nMetric: total spend, net of refunds, excluding transfers.",
+  "semantic_query": {
+    "explore": "fct_transactions",
+    "fields": ["fct_transactions.total_spend_cop"],
+    "filters": {"fct_transactions.transaction_month": "last month"}
+  },
+  "fields_used": [
+    {"name": "fct_transactions.total_spend_cop", "kind": "measure", "type": "number", "description": "..."}
   ],
-  "thought_steps": [
-    {
-      "step_number": 1,
-      "tool": "search_data_catalog",
-      "tool_input": { "query": "What is my net cashflow and savings rate by month?" },
-      "tool_output": "Matched mart_monthly_pnl and savings_rate_percentage",
-      "thought": "Searching semantic catalog for metrics and dimensions..."
-    },
-    {
-      "step_number": 2,
-      "tool": "run_sql_query",
-      "tool_input": { "sql": "SELECT year_month, operating_income, operational_expenses, net_cashflow, savings_rate_pct FROM mart_monthly_pnl ORDER BY year_month ASC LIMIT 12;" },
-      "tool_output": "Returned 9 rows. Columns: ['year_month', 'operating_income', 'operational_expenses', 'net_cashflow', 'savings_rate_pct']",
-      "thought": "Executing LookML-aligned SQL against local DuckDB Lakehouse..."
-    }
-  ],
-  "execution_time_ms": 6.44
+  "governed": true,
+  "notes": [],
+  "sql": "SELECT ... FROM master_records AS fct_transactions WHERE ...",
+  "data": [{"fct_transactions.total_spend_cop": 12417133.52}],
+  "thought_steps": ["..."],
+  "execution_time_ms": 2140.5
 }
 ```

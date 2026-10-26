@@ -25,8 +25,8 @@ docs/
 
 ## Active Documentation
 
-- **[REST API Endpoints Reference](./api/endpoints_reference.md)**: Full specification of all `/api/v1` endpoints (`/health`, `/catalog`, `/agent/query`, `/agent/session/{session_id}`, `/agent/sql`), request/response contracts, and code samples.
-- **[Agent Architecture & ReAct Orchestration](./architecture/agent_architecture.md)**: Autonomous ReAct loop, minimalist zero-shot prompt design, tool binding, multi-turn sliding window memory, and AST execution guardrails.
+- **[REST API Endpoints Reference](./api/endpoints_reference.md)**: Full specification of all `/api/v1` endpoints (`/health`, `/catalog`, `/agent/query`, `/agent/session/{session_id}`, `/agent/sql`, `/semantic/query`, `/semantic/explores`), request/response contracts, and code samples.
+- **[Agent Architecture](./architecture/agent_architecture.md)**: intent routing, semantic tools, the LookML to SQL compiler, traceable answers, session memory, DuckDB lockdown and golden tests.
 - **[Semantic RAG Indexer Architecture](./architecture/semantic_rag_indexer.md)**: LookML single source of truth, AST extraction of views/models/joins (`lkml`), ChromaDB vector store, and data catalog retrieval.
 
 ---

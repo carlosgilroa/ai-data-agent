@@ -25,8 +25,8 @@ flowchart TD
     DynamicMeta --> CatalogItems
     
     CatalogItems --> VectorStore[ChromaDB Vector Store: cosine space]
-    VectorStore --> SearchTool[search_data_catalog Tool]
-    VectorStore --> SchemaTool[get_table_schema Tool]
+    VectorStore --> SearchTool[search_semantic_catalog Tool]
+    VectorStore --> Prompt[Top matches added to the agent prompt]
 ```
 
 ---
@@ -41,16 +41,18 @@ The indexer uses the Python `lkml` parser to extract complete semantic metadata 
    - Extracts time-based dimension groups (e.g. `transaction` with timeframes `[raw, time, date, week, month, quarter, year]`).
 3. **Measures, Aggregation Wrappers & `filters__all`**:
    - Wraps measure SQL expressions in their LookML aggregation type (`sum` $\rightarrow$ `SUM(...)`, `average` $\rightarrow$ `AVG(...)`, `count` $\rightarrow$ `COUNT(...)`).
-   - Extracts `filters__all` conditions and appends both a human-readable `[Filters: ...]` tag to the description and a `FILTER (WHERE ...)` clause to `sql_formula`:
+   - Extracts `filters__all` conditions and appends a human-readable `[Filters: ...]` tag to the description.
+   - Hidden fields (helpers such as raw amounts) are not indexed, so the agent only sees fields it may use.
+   - Each field lists the explores it can be queried in. `search_semantic_catalog` returns lines like:
      ```text
-     [1] total_spend_usd (metric in fct_transactions | Table: master_records | SQL: SUM(ABS(${amount_usd})) FILTER (WHERE is_transfer = no AND amount_usd = <0) | score: 0.634 (distance: 0.366))
-         Description: Total cash outflow in USD (excluding transfers) [Filters: is_transfer = no, amount_usd = <0]
+     [measure] fct_transactions.total_refunds_cop | explores: fct_transactions, transaction_labels
+         Refunds and credits in COP that offset earlier spend (nature = tier2_refund_offset) [Filters: is_transfer = no, nature = tier2_refund_offset]
      ```
 4. **Models, Explores & Relational Joins (`models/**/*.model.lkml`)**:
    - Extracts `explores` and `joins` including `sql_on`, `relationship` (`many_to_one`), and `type` (`left_outer`).
-5. **Decoupled Metric & Schema Retrieval Tools**:
-   - `search_data_catalog` returns high-density, focused metric and dimension definitions with LookML SQL formulas and view bindings without dumping table schema footers.
-   - Table schemas are decoupled into the dedicated `get_table_schema` tool, preventing context window bloat and eliminating table starvation.
+5. **Semantic search only returns explores and fields**:
+   - `search_semantic_catalog` filters Chroma to `explore`, `measure` and `dimension` items (`item_types`), so tables never crowd out fields. Table schemas stay available through `get_table_schema` for the raw SQL fallback.
+   - The runner adds the top `SEMANTIC_SEARCH_TOP_K` matches (default 12) to the prompt, so input tokens stay roughly flat as the LookML project grows.
 6. **Universal Dynamic Table & PDT Metadata**:
    - DuckDB inspects all 8 tables and LookML persistent derived tables (PDTs like `pdt_category_mom_velocity`), dynamically capturing row counts (`COUNT(*)`) and calendar bounds (`MIN/MAX` over `date` or `year_month`):
      ```text
@@ -74,3 +76,9 @@ To prevent low-relevance items from polluting the LLM context while ensuring sin
     $$\text{cutoff} = \max(\text{noise\_floor}, \text{round}(\text{top\_score} \times 0.80, 4))$$
   - All candidate items with $\text{similarity\_score} \ge \text{cutoff}$ are retained up to `top_k`.
   - This allows domain entity queries scoring `0.22`–`0.27` to succeed on the first catalog search without hardcoding entity lists.
+
+---
+
+## 4. Automatic Re-Indexing
+
+The semantic model keeps a fingerprint of every `.lkml` file (path, modification time, size). Before each agent query, `semantic_layer.ensure_fresh()` compares it; when the LookML changed, the model is reloaded and the Chroma catalog is rebuilt, so new fields are searchable without restarting the server or running `scripts/run_indexer.py`.
