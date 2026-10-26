@@ -388,3 +388,21 @@ def test_raw_sql_fallback_is_marked_ungoverned():
 
     denied = AgentRunner._run_tool("run_sql_query", {"sql": "SELECT 1"}, ["run_semantic_query"], "simple_query", trace)
     assert "not permitted" in denied
+
+
+def test_token_usage_is_tracked_per_request():
+    """Every Gemini call's usage_metadata is summed into the request's token_usage."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+    from app.agent.usage import UsageCallback, start_tracking, summarize
+
+    calls = start_tracking()
+    for model, (i, o) in [("router", (300, 40)), ("main", (2500, 120))]:
+        msg = AIMessage(content="", usage_metadata={"input_tokens": i, "output_tokens": o, "total_tokens": i + o})
+        UsageCallback(model).on_llm_end(LLMResult(generations=[[ChatGeneration(message=msg)]]))
+
+    usage = summarize(calls)
+    assert usage["llm_calls"] == 2
+    assert usage["input_tokens"] == 2800
+    assert usage["output_tokens"] == 160
+    assert [c["model"] for c in usage["calls"]] == ["router", "main"]

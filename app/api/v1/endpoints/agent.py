@@ -1,11 +1,26 @@
 import time
 import logging
+from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from app.schemas.query import QueryRequest, QueryResponse, DirectSQLRequest, DirectSQLResponse
 from app.agent.runner import agent_runner
 from app.agent.tools.duckdb_tool import duckdb_tool
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _log_full_trace(response: QueryResponse) -> None:
+    """Append the whole response (steps, tools, tokens) as one JSON line, for reviewing test sessions."""
+    if not settings.QUERY_LOG_PATH:
+        return
+    try:
+        path = Path(settings.QUERY_LOG_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(response.model_dump_json() + "\n")
+    except OSError as e:
+        logger.warning("Could not write query log: %s", e)
 
 router = APIRouter()
 
@@ -29,7 +44,18 @@ def query_agent(request: QueryRequest) -> QueryResponse:
             response.execution_time_ms,
             response.sql,
         )
+        usage = response.token_usage or {}
+        logger.info(
+            "<<< [Session: %s] TOOLS: %s | LLM_CALLS: %s | TOKENS in/out/total: %s/%s/%s",
+            session_label,
+            [s.tool for s in response.thought_steps],
+            usage.get("llm_calls"),
+            usage.get("input_tokens"),
+            usage.get("output_tokens"),
+            usage.get("total_tokens"),
+        )
         logger.info("<<< [Session: %s] AGENT ANSWER: %s", session_label, response.answer)
+        _log_full_trace(response)
         return response
     except (RuntimeError, ValueError) as e:
         logger.warning("Query error [Session: %s]: %s", session_label, e)

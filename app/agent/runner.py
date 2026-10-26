@@ -13,6 +13,7 @@ from app.agent.tools.rag_tool import (
 )
 from app.agent.prompts import AGENT_SYSTEM_PROMPT, RAW_SQL_DISABLED, RAW_SQL_ENABLED
 from app.agent.router import intent_router
+from app.agent.usage import UsageCallback, start_tracking, summarize
 from app.semantic.compiler import SemanticQuery, SemanticQueryError
 from app.semantic.service import semantic_layer
 
@@ -143,6 +144,7 @@ class _AnswerTrace:
         self.notes: List[str] = []
         self.data: List[Dict[str, Any]] = []
         self.governed: Optional[bool] = None
+        self.llm_calls: List[Dict[str, Any]] = []
 
     def record_semantic(self, query: SemanticQuery, result: Dict[str, Any]) -> None:
         self.sql = result["sql"]
@@ -207,6 +209,7 @@ class AgentRunner:
             llm_kwargs: Dict[str, Any] = {
                 "model": model_name,
                 "google_api_key": self.api_key,
+                "callbacks": [UsageCallback(model_name)],
             }
             if "3.5-flash-lite" not in model_name:
                 llm_kwargs["temperature"] = 0.1
@@ -313,6 +316,7 @@ class AgentRunner:
 
         thought_steps: List[AgentThoughtStep] = []
         trace = _AnswerTrace()
+        trace.llm_calls = start_tracking()
 
         session_id = request.session_id.strip() if (request.session_id and request.session_id.strip()) else None
         has_session_context = bool(session_id and session_id in self.sessions)
@@ -478,6 +482,7 @@ class AgentRunner:
             notes=trace.notes,
             data=trace.data if request.explain else [],
             thought_steps=steps if request.explain else [],
+            token_usage=summarize(trace.llm_calls),
             execution_time_ms=round((time.time() - start_time) * 1000, 2),
         )
 

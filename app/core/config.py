@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     AGENT_TODAY: str = ""
     # Let the agent fall back to read-only raw SQL when no explore can answer a question
     ALLOW_RAW_SQL_FALLBACK: bool = True
+    QUERY_LOG_PATH: str = "logs/agent_queries.jsonl"  # full trace of each agent answer; empty disables it
     # Number of explores/fields the catalog search returns to the model
     SEMANTIC_SEARCH_TOP_K: int = 12
 

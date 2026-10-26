@@ -2,6 +2,7 @@ import json
 import logging
 from typing import Tuple, List, Optional
 from langchain_core.messages import SystemMessage, HumanMessage
+from app.agent.usage import UsageCallback
 from app.core.config import settings
 from app.schemas.query import IntentType, RouterDecision
 
@@ -56,6 +57,7 @@ class IntentRouter:
                 model=self.router_model,
                 google_api_key=self.api_key,
                 temperature=0.0,
+                callbacks=[UsageCallback(self.router_model)],
             )
             self.structured_llm = self.llm.with_structured_output(RouterDecision)
             logger.info("Initialized IntentRouter with model %s", self.router_model)
