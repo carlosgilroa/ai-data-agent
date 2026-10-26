@@ -359,7 +359,7 @@ def test_agent_loop_with_fake_llm_is_traceable(monkeypatch):
     fake = _FakeLLM({
         "explore": "fct_transactions",
         "fields": ["fct_transactions.total_spend_cop"],
-        "filters": {"fct_transactions.transaction_month": "2026-10"},
+        "filters": [{"field": "fct_transactions.transaction_month", "value": "2026-10"}],
     })
     monkeypatch.setattr(agent_runner, "api_key", "test-key")
     monkeypatch.setattr(agent_runner, "llm_with_tools", fake)
@@ -466,17 +466,53 @@ def test_retrieval_resolves_filter_values_and_picks_explores():
 
 
 def test_glossary_maps_business_words_to_filters():
-    """A glossary term the data doesn't contain ("eating out") resolves through the agent instructions."""
-    from app.agent.tools.rag_tool import retrieve, resolve_filter_value, retrieve_glossary
+    """Each glossary entry with a field mapping resolves a synonym the data doesn't contain to its value."""
+    from app.agent.tools.rag_tool import resolve_filter_value, retrieve_glossary
     from app.semantic.service import semantic_layer
 
-    if not any(e.term == "eating out" for e in semantic_layer.instructions.glossary):
-        pytest.skip("No 'eating out' glossary entry in the agent instructions")
-    glossary = retrieve_glossary("How much did I spend eating out?")
-    assert any(g["term"] == "eating out" for g in glossary)
-    resolved = resolve_filter_value("eating out", glossary)
-    assert resolved["source"] == "glossary"
-    assert all(m["values"] == ["Restaurants & fast food"] for m in resolved["matches"])
+    mapped = [e for e in semantic_layer.instructions.glossary if e.field and e.value and e.synonyms]
+    if not mapped:
+        pytest.skip("No glossary entry with a field mapping in the agent instructions")
+    for entry in mapped:
+        word = entry.synonyms[0]
+        glossary = retrieve_glossary(f"How much did I spend on {word}?")
+        assert any(g["term"] == entry.term for g in glossary)
+        resolved = resolve_filter_value(word, glossary)
+        assert resolved["source"] == "glossary"
+        assert resolved["matches"]
+        assert all(m["values"] == [entry.value] for m in resolved["matches"])
+
+
+def test_instructions_are_indexed():
+    """The glossary entries and golden queries in the agent instructions all reach the Chroma catalog."""
+    from app.semantic.service import semantic_layer
+
+    instructions = semantic_layer.instructions
+    items = indexer.extract_from_instructions()
+    assert len([i for i in items if i.item_type == "glossary"]) == len(instructions.glossary)
+    assert len([i for i in items if i.item_type == "golden_query"]) == len(instructions.golden_queries)
+
+
+def test_list_filters_compile_like_dict_filters():
+    """The query tool takes filters as a field/value list; it must compile to the same SQL as the dict form."""
+    from app.agent.runner import AgentRunner, _AnswerTrace, filters_to_dict
+    from app.semantic.compiler import SemanticQuery
+    from app.semantic.service import semantic_layer
+
+    as_dict = {"dim_categories.category_name": "Groceries", "fct_transactions.transaction_month": "2026-07"}
+    as_list = [{"field": f, "value": v} for f, v in as_dict.items()]
+    base = {"explore": "fct_transactions", "fields": ["fct_transactions.total_spend_cop"]}
+    assert filters_to_dict(as_list) == as_dict
+    assert (
+        semantic_layer.compile(SemanticQuery(**base, filters=filters_to_dict(as_list))).sql
+        == semantic_layer.compile(SemanticQuery(**base, filters=as_dict)).sql
+    )
+    trace = _AnswerTrace()
+    output = AgentRunner._run_tool("query", {**base, "filters": as_list}, ["query"], "simple_query", trace)
+    assert not output.startswith("Error"), output
+    assert trace.semantic_query["filters"] == as_dict
+    bad = AgentRunner._run_tool("query", {**base, "filters": [{"value": "Groceries"}]}, ["query"], "simple_query", trace)
+    assert bad.startswith("Error")
 
 
 def test_golden_queries_in_instructions_compile():

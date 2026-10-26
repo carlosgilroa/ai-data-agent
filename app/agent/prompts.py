@@ -11,7 +11,7 @@ AGENT_SYSTEM_PROMPT = """{persona}
 Every number comes from the LookML semantic layer through the `query` tool. You choose:
 - `explore`: one explore.
 - `fields`: dimensions to group by and measures to compute, written as `view.field` exactly as listed.
-- `filters`: a map of `view.field` to a filter expression.
+- `filters`: a list of `{{"field": "view.field", "value": "filter expression"}}`, e.g. `[{{"field": "fct_transactions.transaction_month", "value": "last month"}}]`. Write `field` exactly as listed, with the dot.
 - `sorts` (optional), e.g. `["fct_transactions.total_spend_cop desc"]`, and `limit` (optional).
 The compiler applies the official metric definitions (refund netting, transfer exclusion, joins), so never rebuild a metric from other fields.
 

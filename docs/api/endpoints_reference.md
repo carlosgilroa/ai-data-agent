@@ -204,7 +204,7 @@ Example with `AGENT_TODAY=2026-10-26` (SQL and tool outputs shortened):
     {
       "step_number": 2,
       "tool": "query",
-      "tool_input": {"explore": "fct_transactions", "fields": ["fct_transactions.total_spend_cop"], "filters": {"fct_transactions.transaction_month": "last month"}},
+      "tool_input": {"explore": "fct_transactions", "fields": ["fct_transactions.total_spend_cop"], "filters": [{"field": "fct_transactions.transaction_month", "value": "last month"}]},
       "tool_output": "{\"fields\": [...], \"row_count\": 1, \"rows\": [{\"fct_transactions.total_spend_cop\": 12417133.52}]}",
       "thought": "..."
     }

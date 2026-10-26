@@ -79,7 +79,7 @@ Each explore in the prompt lists its time fields, so the time period becomes a f
 
 Named after Looker's agent tools:
 
-1. **`query(explore, fields, filters, sorts, limit)`**: compiles the query with the LookML compiler and runs it. Errors (unknown field, hidden field, bad filter) come back with suggestions so the model can correct itself.
+1. **`query(explore, fields, filters, sorts, limit)`**: compiles the query with the LookML compiler and runs it. Filters are a list of `{"field": "view.field", "value": "expression"}` objects rather than a map, because Gemini's function calling garbled free-form object keys (dots turned into underscores, invented keys); the runner converts the list to the `{view.field: expression}` map the compiler and the `/semantic` endpoints take. Errors (unknown field, hidden field, bad filter) come back with suggestions so the model can correct itself.
 2. **`get_field_values(explore, field?, search?)`**: Looker's filter suggestions. With a field: up to 100 distinct values, only those containing `search` if given, with `total` and `truncated` so a cut-off list is never mistaken for the full one. With only `search`: checks every searchable text dimension of the explore and returns which ones contain the word.
 3. **`get_explores()`, `get_dimensions(explore)`, `get_measures(explore)`**: the explores and their visible fields.
 4. **`search_semantic_catalog(query)`**: a free-text search of field descriptions in Chroma.

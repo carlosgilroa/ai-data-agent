@@ -4,6 +4,7 @@ import json
 from typing import Dict, Any, List, Optional, Tuple
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.tools import tool
+from pydantic import BaseModel, Field as PydanticField
 from app.core.config import settings
 from app.schemas.query import QueryRequest, QueryResponse, AgentThoughtStep
 from app.agent.tools.duckdb_tool import duckdb_tool
@@ -80,11 +81,50 @@ def get_field_values(explore: str, field: Optional[str] = None, search: Optional
         return f"Error: {e}"
 
 
+# Filters go to the model as a list of field/value objects, not a {field: value} map: Gemini's function
+# calling garbled free-form object keys (dots became underscores, keys were invented).
+class QueryFilter(BaseModel):
+    """One filter: a field and the filter expression to apply to it."""
+
+    field: str = PydanticField(..., description="Exact field name as view.field, e.g. fct_transactions.transaction_month")
+    value: str = PydanticField(..., description="Looker filter expression, e.g. last month, Groceries, -Rent, >1000000")
+
+
+def filters_to_dict(filters: Any) -> Dict[str, str]:
+    """The compiler's {view.field: expression} map from the tool's list of field/value filters.
+    A dict passes through unchanged, so older callers and session examples keep working.
+    """
+    if not filters:
+        return {}
+    if isinstance(filters, dict):
+        return {str(k): str(v) for k, v in filters.items()}
+    result: Dict[str, str] = {}
+    for item in filters:
+        if isinstance(item, QueryFilter):
+            item = item.model_dump()
+        if not isinstance(item, dict) or not item.get("field") or item.get("value") is None:
+            raise ValueError(f'Each filter must be {{"field": "view.field", "value": "expression"}}, got {item!r}')
+        result[str(item["field"])] = str(item["value"])
+    return result
+
+
+def filters_to_list(filters: Dict[str, str]) -> List[Dict[str, str]]:
+    return [{"field": f, "value": v} for f, v in filters.items()]
+
+
+def _tool_args(semantic_query: Dict[str, Any]) -> Dict[str, Any]:
+    """A semantic query written the way the `query` tool takes it (filters as a field/value list)."""
+    args = dict(semantic_query)
+    if isinstance(args.get("filters"), dict):
+        args["filters"] = filters_to_list(args["filters"])
+    return args
+
+
 @tool
 def query(
     explore: str,
     fields: List[str],
-    filters: Optional[Dict[str, str]] = None,
+    filters: Optional[List[QueryFilter]] = None,
     sorts: Optional[List[str]] = None,
     limit: int = 500,
 ) -> str:
@@ -92,12 +132,12 @@ def query(
     LookML definitions, so metrics are always computed the governed way.
     explore: explore name, e.g. 'fct_transactions'.
     fields: dimensions and measures as view.field, e.g. ['dim_categories.category_group', 'fct_transactions.total_spend_cop'].
-    filters: map of view.field to a filter expression, e.g. {'fct_transactions.transaction_month': 'last month'}.
+    filters: list of {field, value}, e.g. [{'field': 'fct_transactions.transaction_month', 'value': 'last month'}].
     sorts: e.g. ['fct_transactions.total_spend_cop desc']. limit: maximum rows.
     """
     try:
         result = semantic_layer.run(
-            SemanticQuery(explore=explore, fields=fields, filters=filters or {}, sorts=sorts or [], limit=limit)
+            SemanticQuery(explore=explore, fields=fields, filters=filters_to_dict(filters), sorts=sorts or [], limit=limit)
         )
     except (SemanticQueryError, ValueError) as e:
         return f"Error: {e}"
@@ -186,7 +226,7 @@ def _format_retrieval(retrieval: Retrieval, decision: Any) -> str:
     if retrieval.golden_queries:
         lines.append("Verified example queries:")
         for golden in retrieval.golden_queries:
-            lines.append(f'- "{golden["question"]}" -> {json.dumps(golden["query"])}')
+            lines.append(f'- "{golden["question"]}" -> query({json.dumps(_tool_args(golden["query"]))})')
     return "\n".join(lines)
 
 
@@ -326,7 +366,7 @@ class AgentRunner:
         assistant_content = assistant_answer
         if last_semantic_query:
             # Lets a follow-up ("and in August?") reuse the previous query and change one part
-            assistant_content += f"\n\nSemantic query used: {json.dumps(last_semantic_query)}"
+            assistant_content += f"\n\nSemantic query used: {json.dumps(_tool_args(last_semantic_query))}"
         elif last_sql and "```sql" not in assistant_content:
             assistant_content += f"\n\n```sql\n-- Executed Lakehouse Query\n{last_sql}\n```"
 
@@ -548,7 +588,7 @@ class AgentRunner:
                 semantic_query = SemanticQuery(
                     explore=args.get("explore", ""),
                     fields=args.get("fields") or [],
-                    filters=args.get("filters") or {},
+                    filters=filters_to_dict(args.get("filters")),
                     sorts=args.get("sorts") or [],
                     limit=args.get("limit") or 500,
                 )
