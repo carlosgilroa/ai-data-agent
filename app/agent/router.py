@@ -19,24 +19,32 @@ SEMANTIC_TOOLS = [
 ]
 RAW_SQL_TOOLS = ["get_table_schema", "run_sql_query"]
 
-ROUTER_SYSTEM_PROMPT = """You are an Intent Classification & Semantic Query Router for a personal finance and lakehouse analytics AI agent.
-Your responsibility is twofold:
+# Nothing here names the dataset: the domain comes from the explores in the semantic layer (domain_overview)
+ROUTER_SYSTEM_PROMPT = """You route questions for a data agent that answers only from a LookML semantic layer.
+The data it can answer about (one line per explore):
+{domain}
 
-1. Intent Classification:
-   Classify the user's message into one of four intent categories:
-   - "out_of_scope": Questions completely unrelated to personal finance, expenses, income, cashflow, budgets, currencies, accounting, or the data lakehouse.
-   - "capabilities": Questions asking what you can do, how you work, what tools or tables you have access to.
-   - "simple_query": Direct single-metric lookups, distinct counts, category spend aggregations, or single-table aggregations.
-   - "complex_query": Multi-hop analytical questions, period-over-period comparisons, Tier 1 vs Tier 2 accounting reconciliations, multi-currency FX analysis, budget variance diagnostics, open-ended exploration of transactions.
+1. Classify the user's message into one intent:
+   - "out_of_scope": unrelated to the data above.
+   - "capabilities": asks what the agent can do, how it works, or what data or tools it has.
+   - "simple_query": one or a few measures, optionally filtered, for one period or broken down by one dimension.
+   - "complex_query": needs several steps or queries: comparisons between periods or groups, ratios across explores, diagnosing a change, or open-ended exploration.
 
-2. Split analytical questions into LookML terms (leave a list empty when the question has none):
-   - "measures": what to calculate, in plain words, e.g. ["total spend"], ["savings rate"], ["number of expenses"].
-   - "dimensions": what to group or break down by, e.g. ["merchant"], ["category group", "month"]. Empty for a single total.
-   - "filter_values": specific values to filter on, exactly as the user wrote them, e.g. ["restaurants"], ["uber"], ["Eurotrip"]. Never dates.
+2. For simple_query and complex_query, split the question into LookML terms (leave a list empty when the question has none):
+   - "measures": what to calculate, in the user's words.
+   - "dimensions": what to group or break the result down by, in the user's words. Empty for a single total.
+   - "filter_values": specific values to filter on, exactly as the user wrote them. Never dates.
    - "time_period": the period as a filter phrase, e.g. "last month", "this year", "2026-09", "2026-08, 2026-09".
-   Example: "How much did I spend on restaurants last month?" -> measures ["total spend"], dimensions [], filter_values ["restaurants"], time_period "last month".
-   Example: "Top merchants by spend this year" -> measures ["total spend"], dimensions ["merchant"], filter_values [], time_period "this year".
+   Example: "What was <measure> for <value> last month?" -> measures ["<measure>"], dimensions [], filter_values ["<value>"], time_period "last month".
+   Example: "Top <dimension> by <measure> this year" -> measures ["<measure>"], dimensions ["<dimension>"], filter_values [], time_period "this year".
 """
+
+
+def domain_overview() -> str:
+    """What the agent can answer about, from the explores' LookML labels (so no dataset is hardcoded)."""
+    from app.semantic.service import semantic_layer
+
+    return "\n".join(f"- {e.label or e.name}" for e in semantic_layer.model.explores.values())
 
 
 class IntentRouter:
@@ -87,12 +95,12 @@ class IntentRouter:
             )
 
         context_hint = (
-            "\n(Note: This message is a follow-up within an active financial data conversation session.)"
+            "\n(Note: This message is a follow-up within an active conversation session.)"
             if has_session_context
             else ""
         )
         messages = [
-            SystemMessage(content=ROUTER_SYSTEM_PROMPT + context_hint),
+            SystemMessage(content=ROUTER_SYSTEM_PROMPT.format(domain=domain_overview()) + context_hint),
             HumanMessage(content=query),
         ]
 

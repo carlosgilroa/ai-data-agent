@@ -58,6 +58,8 @@ The router model returns a `RouterDecision` that splits the question in LookML t
 | `simple_query` | simple model | all semantic tools (+ raw SQL fallback) | 5 |
 | `complex_query` | main model | all semantic tools (+ raw SQL fallback) | 8 |
 
+The router's prompt names no dataset: its examples use placeholders (`<measure>`, `<value>`), and what counts as in scope comes from the explore labels in the semantic layer, listed at runtime by `domain_overview()` in `router.py`. The out-of-scope reply uses the same list.
+
 The raw SQL tools are only bound when `ALLOW_RAW_SQL_FALLBACK=True`.
 
 ---
@@ -94,6 +96,9 @@ Named after Looker's agent tools:
 Like a Looker data agent, the agent reads instructions from a file (`AGENT_INSTRUCTIONS_PATH`):
 
 - **persona**: the first lines of the system prompt.
+
+This file is the only place for dataset-specific wording. The fixed prompts in `router.py`, `prompts.py` and the tool descriptions use neutral placeholders, so the agent relies on the semantic layer rather than on examples: for instance, it picks the measure whose LookML description starts with DEFAULT instead of following a hardcoded list of default metrics. `test_prompts_name_no_dataset` guards this.
+
 - **glossary**: business words the data doesn't contain, mapped to a field and value or explained in words (e.g. "living expenses" means `tier1_operational_spend_cop`).
 - **default_filters**: filters applied to an explore unless the query filters that field itself; each one is reported in the answer's notes.
 - **golden_queries**: verified question and query pairs, shown as examples when a question is similar. Keep them different from the evaluation questions in `tests/golden/questions.json`, so the live evaluation isn't graded on examples it was shown.

@@ -16,7 +16,7 @@ from app.agent.tools.rag_tool import (
     search_semantic_catalog as raw_search_semantic_catalog,
 )
 from app.agent.prompts import AGENT_SYSTEM_PROMPT, DEFAULT_PERSONA, RAW_SQL_DISABLED, RAW_SQL_ENABLED
-from app.agent.router import intent_router
+from app.agent.router import domain_overview, intent_router
 from app.agent.usage import UsageCallback, start_tracking, summarize
 from app.semantic.compiler import SemanticQuery, SemanticQueryError
 from app.semantic.service import semantic_layer
@@ -32,8 +32,8 @@ TOOL_PREVIEW_ROWS = 50
 
 @tool
 def search_semantic_catalog(query: str) -> str:
-    """Search the descriptions of LookML measures and dimensions for a phrase
-    (e.g. 'spend net of refunds', 'budget cap'). Returns view.field names and the explores they are in.
+    """Search the descriptions of LookML measures and dimensions for a phrase in plain words.
+    Returns view.field names and the explores they are in.
     """
     return raw_search_semantic_catalog(query)
 
@@ -87,8 +87,8 @@ def get_field_values(explore: str, field: Optional[str] = None, search: Optional
 class QueryFilter(BaseModel):
     """One filter: a field and the filter expression to apply to it."""
 
-    field: str = PydanticField(..., description="Exact field name as view.field, e.g. fct_transactions.transaction_month")
-    value: str = PydanticField(..., description="Looker filter expression, e.g. last month, Groceries, -Rent, >1000000")
+    field: str = PydanticField(..., description="Exact field name as view.field, as listed in the context or a tool result")
+    value: str = PydanticField(..., description="Looker filter expression, e.g. <value>, -<value>, %<text>%, >1000, last month")
 
 
 def filters_to_dict(filters: Any) -> Dict[str, str]:
@@ -131,10 +131,10 @@ def query(
 ) -> str:
     """Run a query against the LookML semantic layer. The compiler writes the SQL from the official
     LookML definitions, so metrics are always computed the governed way.
-    explore: explore name, e.g. 'fct_transactions'.
-    fields: dimensions and measures as view.field, e.g. ['dim_categories.category_group', 'fct_transactions.total_spend_cop'].
-    filters: list of {field, value}, e.g. [{'field': 'fct_transactions.transaction_month', 'value': 'last month'}].
-    sorts: e.g. ['fct_transactions.total_spend_cop desc']. limit: maximum rows.
+    explore: explore name, as listed.
+    fields: dimensions and measures as view.field, e.g. ['<view>.<dimension>', '<view>.<measure>'].
+    filters: list of {field, value}, e.g. [{'field': '<view>.<time field>_month', 'value': 'last month'}].
+    sorts: e.g. ['<view>.<measure> desc']. limit: maximum rows.
     """
     try:
         result = semantic_layer.run(
@@ -147,13 +147,13 @@ def query(
 
 @tool
 def get_table_schema(table_name: str) -> str:
-    """Fallback only: column names and types of a raw lakehouse table, for read-only SQL when no explore fits."""
+    """Fallback only: column names and types of a raw table, for read-only SQL when no explore fits."""
     return raw_get_table_schema(table_name)
 
 
 @tool
 def run_sql_query(sql: str) -> str:
-    """Fallback only: run read-only SQL on the raw lakehouse tables when no explore can answer the question.
+    """Fallback only: run read-only SQL on the raw tables when no explore can answer the question.
     Results are not governed metrics.
     """
     try:
@@ -489,10 +489,10 @@ class AgentRunner:
             oos_messages = [
                 SystemMessage(
                     content=(
-                        "You are a specialized personal finance and data lakehouse AI assistant. "
-                        "Politely decline the user's question because it is outside the scope of "
-                        "personal finance, accounting, and lakehouse analytics, and briefly remind "
-                        "them what financial questions you can help answer."
+                        f"{semantic_layer.instructions.persona.strip() or DEFAULT_PERSONA}\n\n"
+                        "The user's question is outside the data you can answer about. Politely decline, and "
+                        "say briefly what kinds of questions you can answer, based on this data:\n"
+                        f"{domain_overview()}"
                     )
                 ),
                 HumanMessage(content=request.query),

@@ -474,6 +474,30 @@ def test_token_usage_records_each_calls_input():
     assert calls[-1]["input"]["output_schema"] == "RouterDecision"
 
 
+def test_prompts_name_no_dataset():
+    """The fixed prompt text names no dataset values or fields: the domain comes from the semantic layer
+    at runtime, and dataset-specific wording only from agent_instructions.yaml."""
+    import json as _json
+    from app.agent.prompts import AGENT_SYSTEM_PROMPT, DEFAULT_PERSONA, RAW_SQL_DISABLED, RAW_SQL_ENABLED
+    from app.agent.router import ROUTER_SYSTEM_PROMPT, domain_overview
+    from app.agent.runner import tool_declarations
+    from app.schemas.query import RouterDecision
+
+    fixed_text = "\n".join([
+        ROUTER_SYSTEM_PROMPT,
+        _json.dumps(RouterDecision.model_json_schema()),
+        AGENT_SYSTEM_PROMPT, DEFAULT_PERSONA, RAW_SQL_ENABLED, RAW_SQL_DISABLED,
+        _json.dumps(tool_declarations(list(TOOL_REGISTRY))),
+    ]).lower()
+    for word in ["groceries", "rent", "uber", "eurotrip", "bancolombia", "restaurant", "merchant", "category group",
+                 "fct_transactions", "dim_categories", "tier 1", "tier 2", "fx", "budget", "cop", "finance", "lakehouse"]:
+        assert f" {word}" not in fixed_text and f"'{word}" not in fixed_text and f'"{word}' not in fixed_text, word
+
+    from app.semantic.service import semantic_layer
+    assert domain_overview().splitlines() == [f"- {e.label or e.name}" for e in semantic_layer.model.explores.values()]
+    assert "{domain}" in ROUTER_SYSTEM_PROMPT
+
+
 def test_tool_descriptions_are_sent_once():
     """Gemini gets each tool's description on the function only, not again on its parameters object,
     while parameter descriptions (the query filter's field and value) are kept."""
