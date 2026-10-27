@@ -1,122 +1,175 @@
-# Agent Architecture: Two-Step Intent Routing & Discrete Modular Semantic Tools
+# Agent Architecture: a Looker-Style Semantic Layer Agent
 
-This document outlines the architecture, routing mechanics, tool definitions, and conversational memory powering the **Autonomous AI Data Agent** in `app/agent/`.
+This document describes how the agent in `app/agent/` and `app/semantic/` turns a question into a number. It is modelled on [Conversational Analytics in Looker](https://docs.cloud.google.com/looker/docs/2608/conversational-analytics-overview), simplified:
+
+- **Semantic layer (LookML):** the model never writes metric SQL. It chooses an explore, fields and filters, and a deterministic compiler writes the SQL, as Looker does.
+- **RAG (Chroma):** for each question, Chroma retrieves the explores and fields that fit, plus glossary entries and verified example queries, so the prompt stays small as the LookML grows.
+- **ReAct agent:** the model reasons in a loop with Looker-like tools (get_explores, get_dimensions, get_measures, get_field_values, query) until it can answer.
 
 ---
 
 ## 1. System Overview
 
-The AI Data Agent is designed following industry patterns (Snowflake Cortex Analyst, Looker MCP, Cube, Wren AI). It bridges the context gap between natural language questions and the local DuckDB lakehouse via the **LookML semantic layer**:
-
 ```mermaid
 flowchart TD
-    User([User Ingestion / REST Request]) --> Router[1. IntentRouter: gemini-3.1-flash-lite]
-    
-    subgraph RoutingDecision["Intent Classification & Budgeting"]
-        Router -->|out_of_scope: 0 steps| OOS[Polite Scope Refusal]
-        Router -->|capabilities: 2 steps| Cap[Grounding: Catalog & Schema Introspection]
-        Router -->|simple_query: 6 steps| Simple[Fast Execution: gemini-3.5-flash-lite]
-        Router -->|complex_query: 8 steps| Complex[Deep Multi-Hop: gemini-3.8-flash]
+    User([Question]) --> Router["1. IntentRouter: intent + measures, dimensions, filter values, time"]
+
+    Router --> Retrieval
+    subgraph Retrieval["2. Retrieval, no Gemini calls"]
+        R1["Chroma: measures and dimensions, searched separately"]
+        R2["Explores ranked by their own match + their best fields + filter values found"]
+        R3["Filter values: glossary, else a search of the data"]
+        R4["Chroma: glossary entries and golden queries"]
     end
 
-    subgraph RuntimeEnvelope["Lakehouse Context Envelope"]
-        Simple --> Env["Dynamic Temporal Grounding (Recorded Min/Max Date Bounds)"]
-        Complex --> Env
-        Cap --> Env
+    Retrieval --> Loop
+    subgraph Loop["3. ReAct loop (AgentRunner)"]
+        T1[query]
+        T2[get_field_values]
+        T3["get_explores / get_dimensions / get_measures"]
+        T4[search_semantic_catalog]
+        T5["get_table_schema / run_sql_query (fallback)"]
     end
 
-    subgraph AgentLoop["Autonomous ReAct Loop"]
-        Env --> Runner[AgentRunner]
-        Runner <--> T1["search_data_catalog: LookML Metrics & Dimensions"]
-        Runner <--> T2["get_table_schema: Grain, PK, Stats & Column Types"]
-        Runner <--> T3["get_dimension_values: Distinct Entity / Category Lookups"]
-        Runner <--> T4["run_sql_query: Safe Read-Only DuckDB Execution"]
-        
-        subgraph Lakehouse["Analytical Lakehouse & PDTs"]
-            T3 <--> DuckDB[(DuckDB In-Memory Engine)]
-            T4 <--> DuckDB
-            DuckDB --> Parquet["silver / gold Parquet Tables"]
-            DuckDB --> LookMLPDT["LookML Derived Table Views (PDTs)"]
-        end
-    end
-
-    Runner -->|Synthesized Answer + SQL + Traceability| Output([Executive Markdown Response])
+    T1 --> Compiler["LookML compiler"] --> DuckDB[(DuckDB, file access locked)]
+    T2 --> Compiler
+    T5 -.-> DuckDB
+    Loop --> Out(["Answer + metric line + semantic query + SQL + fields + notes + tokens"])
 ```
 
 ---
 
-## 2. Two-Step Intent Router (`app/agent/router.py`)
+## 2. Intent Router (`app/agent/router.py`)
 
-To optimize latency and token cost while preventing unnecessary exploratory tool loops, every incoming request first passes through [`IntentRouter`](file:///c:/projects/ai-data-agent/app/agent/router.py).
+The router model returns a `RouterDecision` that splits the question in LookML terms:
 
-### Step 1: Classification & Semantic Decomposition (`gemini-3.1-flash-lite`)
-`gemini-3.1-flash-lite` inspects the user prompt and outputs a structured `RouterDecision` with zero tools bound:
-- **`intent` & `reasoning`**: Classifies the query into one of the 4 intent categories and explains the decision.
-- **`metric_search_phrase`**: Decomposes the user inquiry into a natural semantic query phrase combining the metric/aggregation intent with domain context (e.g. `'total food spending expenses last month'`), optimized for dense vector cosine similarity search in `search_data_catalog`.
-- **`entity_keywords`**: Extracts specific domain entities, category names, or account names (e.g. `['food', 'transportation']`), prepared for discrete categorical validation via `get_dimension_values`.
+| Field | Example for "How much did I spend on restaurants last month?" |
+|:---|:---|
+| `intent` | `simple_query` |
+| `measures` | `["total spend"]` |
+| `dimensions` | `[]` (no group-by) |
+| `filter_values` | `["restaurants"]` |
+| `time_period` | `"last month"` |
 
-### Step 2: Routed Model & Discrete Tool Allocation
-Based on the classified `intent`, `AgentRunner` selects the target Gemini model, allowed tools, and `max_iterations` ceiling:
+| Intent | Model | Tools | Steps |
+|:---|:---|:---|:---:|
+| `out_of_scope` | router model | none | 0 |
+| `capabilities` | router model | `get_explores`, `get_measures`, `get_dimensions` | 2 |
+| `simple_query` | simple model | all semantic tools (+ raw SQL fallback) | 5 |
+| `complex_query` | main model | all semantic tools (+ raw SQL fallback) | 8 |
 
-| Intent Category | Target Execution Model | Allowed Tools | `max_iterations` | Purpose |
-|:---|:---|:---|:---:|:---|
-| `out_of_scope` | `gemini-3.1-flash-lite` | *None* | `0` | Politely declines non-financial/unrelated trivia questions without touching ChromaDB or DuckDB. |
-| `capabilities` | `gemini-3.1-flash-lite` | `search_data_catalog`, `get_table_schema` | `2` | Grounds "what can you do?" responses in live indexed LookML tables and metric definitions. |
-| `simple_query` | `gemini-3.5-flash-lite` | `search_data_catalog`, `get_table_schema`, `get_dimension_values`, `run_sql_query` | `6` | Fast, cost-efficient execution for single-metric lookups, category spend aggregations, and counts. |
-| `complex_query` | `gemini-3.8-flash` | `search_data_catalog`, `get_table_schema`, `get_dimension_values`, `run_sql_query` | `8` | Deep multi-hop reasoning, period-over-period comparisons, Tier 1 vs Tier 2 reconciliations, and joins. |
+The router's prompt names no dataset: its examples use placeholders (`<measure>`, `<value>`), and what counts as in scope comes from `data_description` in `agent_instructions.yaml` (`data_description()` in `router.py`). Without one, the router falls back to the explore labels from the semantic layer, without their layer suffix such as "(Gold)". The out-of-scope reply uses the same description, so the user learns what they can ask.
 
----
-
-## 3. Discrete Modular Semantic Tools
-
-The agent interacts with the semantic layer and data lakehouse via 4 specialized, decoupled tools:
-
-1. **`search_data_catalog(query: str)`**:
-   - Searches the LookML semantic catalog via cosine similarity with an 80% relative cutoff.
-   - Returns clean metric and dimension definitions with LookML calculation formulas, description notes, and view/table bindings.
-   - Does **not** dump raw schema footers, preventing context window pollution.
-2. **`get_table_schema(table_name: str)`**:
-   - On-demand schema inspection for any physical Parquet table or LookML persistent derived table (PDT).
-   - Returns explicit row grain, compound primary key, row count stats, date coverage (`min to max`), and column names with data types.
-3. **`get_dimension_values(table_name: str, column_name: str, pattern: Optional[str], limit: int)`**:
-   - Directly queries distinct categorical values (e.g. category names, merchants, accounts) from DuckDB matching an optional pattern.
-   - SQL-injection safe: validates table and column names against live database metadata before executing parameterized queries.
-   - Eliminates exploratory `SELECT DISTINCT` queries from the model's analytical step budget.
-4. **`run_sql_query(sql: str)`**:
-   - Executes safe read-only SQL queries against DuckDB views.
-   - Regex-guarded against data modification statements (`DROP`, `DELETE`, `INSERT`, `ALTER`, `ATTACH`).
+The raw SQL tools are only bound when `ALLOW_RAW_SQL_FALLBACK=True`.
 
 ---
 
-## 4. Autonomous ReAct Reasoning Loop
+## 3. Retrieval (`app/agent/tools/rag_tool.py`)
 
-The core orchestration resides in [`AgentRunner.run_query()`](file:///c:/projects/ai-data-agent/app/agent/runner.py):
+Retrieval runs in code before the loop and costs no Gemini tokens:
 
-1. **Router Classification (`Step 1`)**: Records an `intent_router` thought step detailing the chosen intent, target model, and step budget.
-2. **Dynamic Context Envelope Injection & Semantic Guidance**:
-   - Dynamically inspects DuckDB (`duckdb_tool.get_temporal_bounds()`) to discover recorded lakehouse calendar bounds (`2026-01 to 2026-10`).
-   - Injects the Context Envelope with zero-shot temporal grounding and semantic decomposition guidance (`metric_search_phrase` and `entity_keywords`), directing the agent to search the catalog with enriched domain phrases rather than isolated keywords.
-3. **Unrestricted ReAct Iteration Step (up to `max_iterations`)**:
-   - Passes message history to `routed_llm_with_tools.invoke(messages)`.
-   - Allows natural multi-step introspection (e.g. search catalog $\rightarrow$ inspect values $\rightarrow$ execute SQL).
-   - Captures each tool call output into an `AgentThoughtStep` for full observability.
-   - **Self-Correction on Error**: If DuckDB returns an error, the raw error is returned to Gemini in the `ToolMessage` for automatic query refinement.
-4. **Synthesis & Anti-Hallucination Directives**:
-   - When Gemini outputs a response without tool calls (or when `max_iterations` is reached, using `tool_choice="none"`), it synthesizes a grounded analytical answer.
-   - Strictly enforced **Absolute Financial Grounding**: the model is forbidden from inventing or extrapolating numbers. Every figure presented MUST come directly from rows returned by `run_sql_query`.
+1. **Measures and dimensions are searched separately** in Chroma, each with its own phrase from the router, so one type never crowds out the other. No dimension search runs when the question has no group-by.
+2. **Explores are picked first, Looker-style.** Each explore scores its own similarity to the question, plus its best measure, its best dimension (half weight) and half a point for each filter value found in it. The top `RETRIEVAL_EXPLORES` (default 3) are kept, and only fields inside them are shown: up to `RETRIEVAL_MEASURES` and `RETRIEVAL_DIMENSIONS` (default 5 each).
+3. **Filter values are resolved.** Each value the user mentioned is matched against the glossary first ("eating out" means category_name = "Restaurants & fast food"), and otherwise searched in every searchable text dimension (see section 4). The prompt shows the exact values found, e.g. `dim_categories.category_name = 'Restaurants & fast food'`.
+4. **Agent instructions are retrieved.** Glossary entries whose term or synonym appears in the question, plus close vector matches, and the closest golden queries (verified question and query pairs) as examples.
+
+Each explore in the prompt lists its time fields, so the time period becomes a filter without a lookup. The retrieval result is also recorded as a `retrieval` step in `thought_steps`, with similarity scores the prompt doesn't get: each measure, dimension and golden query has its cosine `score`; each glossary entry says whether it matched by `keyword` (no score) or `vector`; and each explore has its combined `score` with the `parts` it was built from (`own` similarity, `best_measure`, half its `best_dimension`, and `filter_bonus` of 0.5 per filter value found in it). Scores are rounded to 3 decimals.
 
 ---
 
-## 5. Multi-Turn Session Memory & Protocol Safety
+## 4. Tools
 
-Conversational memory enables natural back-and-forth financial exploration while maintaining strict Gemini API protocol compliance:
+Named after Looker's agent tools:
 
-- **Keyed by Session ID**: Requests provide an optional `session_id` in `QueryRequest`.
-- **Clean Dialogue Turn Persistence (`_save_session_turn`)**:
-  - Across turns, session memory preserves clean conversational pairs (`HumanMessage` and `AIMessage`), appending the executed Lakehouse SQL query to the assistant message for semantic continuity.
-  - Raw intermediate ReAct scratchpad messages (`ToolMessage` and intermediate function calls) are discarded upon turn completion. This guarantees that Gemini's API never encounters orphaned tool messages or turn-sequencing errors (`400 INVALID_ARGUMENT: function call turn must come immediately after a user turn or function response`).
-- **Dynamic Context Envelope Refresh**: Every new turn begins with a fresh `SystemMessage` containing the latest Lakehouse temporal bounds and router semantic decomposition guidance.
-- **Turn-Boundary Sliding Window**: Retains up to 10 clean conversation turns (20 dialogue messages), completely eliminating naive slicing across tool calls.
-- **Reset Endpoint**: `DELETE /api/v1/agent/session/{session_id}` clears state on demand.
-- **Session Inspection Endpoint**: `GET /api/v1/agent/session/{session_id}` returns active dialogue history, turn counts, and raw messages for live inspection.
-- **Server Observability & Structured Logging**: The agent endpoint logs incoming queries, model routing, executed Lakehouse SQL queries, latency, and synthesized answers in real time (`>>> USER QUERY`, `<<< AGENT ANSWER`) for live monitoring and diagnostics.
+1. **`query(explore, fields, filters, sorts, limit)`**: compiles the query with the LookML compiler and runs it. Filters are a list of `{"field": "view.field", "value": "expression"}` objects rather than a map, because Gemini's function calling garbled free-form object keys (dots turned into underscores, invented keys); the runner converts the list to the `{view.field: expression}` map the compiler and the `/semantic` endpoints take. Errors (unknown field, hidden field, bad filter) come back with suggestions so the model can correct itself.
+2. **`get_field_values(explore, field?, search?)`**: Looker's filter suggestions. With a field: up to 100 distinct values, only those containing `search` if given, with `total` and `truncated` so a cut-off list is never mistaken for the full one. With only `search`: checks every searchable text dimension of the explore and returns which ones contain the word.
+3. **`get_explores()`, `get_dimensions(explore)`, `get_measures(explore)`**: the explores and their visible fields.
+4. **`search_semantic_catalog(query)`**: a free-text search of field descriptions in Chroma.
+5. **`get_table_schema(table)` and `run_sql_query(sql)`**: the raw read-only SQL fallback for exploratory questions no explore can answer. Answers built this way say so and return `governed: false`.
+
+**Which fields can be searched** comes from LookML, as in Looker: text dimensions that aren't hidden or primary keys, unless they set `suggestions: no` (wallet-lookml sets it on the free-text `note`). `suggest_explore` and `suggest_dimension` redirect a lookup to another field. The value search tries the word whole, singular and word by word ("restaurants" also finds "Restaurant & ..."), and ranks exact matches first, then the most specific match, then the most categorical field, so a category list comes before a merchant list.
+
+---
+
+## 5. Agent Instructions (`agent_instructions.yaml`)
+
+Like a Looker data agent, the agent reads instructions from a file (`AGENT_INSTRUCTIONS_PATH`):
+
+- **persona**: the first lines of the system prompt.
+- **data_description**: one or two sentences on what the data covers, like a Looker data agent's description. The router uses it to decide what is out of scope, and the out-of-scope reply quotes it.
+
+This file is the only place for dataset-specific wording. The fixed prompts in `router.py`, `prompts.py` and the tool descriptions use neutral placeholders, so the agent relies on the semantic layer rather than on examples: for instance, it picks the measure whose LookML description starts with DEFAULT instead of following a hardcoded list of default metrics. `test_prompts_name_no_dataset` guards this.
+
+- **glossary**: business words the data doesn't contain, mapped to a field and value or explained in words (e.g. "living expenses" means `tier1_operational_spend_cop`).
+- **default_filters**: filters applied to an explore unless the query filters that field itself; each one is reported in the answer's notes.
+- **golden_queries**: verified question and query pairs, shown as examples when a question is similar. Keep them different from the evaluation questions in `tests/golden/questions.json`, so the live evaluation isn't graded on examples it was shown.
+
+The glossary and golden queries are indexed in Chroma, so only the relevant entries reach the prompt. Golden queries that no longer compile are skipped at indexing time with a warning. Changing the file reloads it and rebuilds the index, as with LookML changes.
+
+---
+
+## 6. The LookML Compiler (`app/semantic/`)
+
+- **`model.py`** parses views, explores, joins, dimension groups (one field per timeframe, e.g. `fct_transactions.transaction_month`), measure filters, derived tables, labels and suggestion settings with `lkml`. The model reloads when any `.lkml` file changes, and the Chroma catalog is rebuilt with it.
+- **`compiler.py`** builds the SQL:
+  - joins only the views the query needs (plus views their `sql_on` refers to, and inner joins);
+  - `type: number` measures inline the measures they reference;
+  - when a `one_to_many` join fans out rows, sums and averages use symmetric aggregates and counts use `COUNT(DISTINCT pk)`, so totals are never double counted;
+  - dimension filters go to `WHERE`, measure filters to `HAVING`;
+  - default order: time dimensions ascending, otherwise the first measure descending.
+- **`dates.py`** resolves date filters into date ranges. "last month" is the previous full calendar month, "this month" is the current month to date, "last 3 months" means three complete months and "past 3 months" includes the current one. `AGENT_TODAY` can pin today's date.
+- **`service.py`** runs compiled queries, applies default filters, looks up and searches field values, and adds coverage notes when a period is only partly covered by the data.
+
+Filter grammar: `Groceries,Rent` (either), `-Rent` (exclude), `%uber%` (contains), `^,` (a literal comma), `yes`/`no`, `>1000000`, `[100,500]`, `2026-09`, `2026-Q3`, `2026-01 through 2026-03`, `before 2026-06`, `last month`, `this year`.
+
+---
+
+## 7. Traceable Answers
+
+Every `QueryResponse` includes:
+- `answer`: leads with the number in COP and a "Metric:" line naming the metric in plain words;
+- `semantic_query`: the explore, fields, filters and sorts used;
+- `fields_used`: the LookML fields with their descriptions;
+- `sql`: the compiled (or fallback) SQL;
+- `data`: the rows behind the answer;
+- `notes`: caveats such as partly covered periods or the raw-SQL warning;
+- `governed`: `true` for LookML metrics, `false` for the raw SQL fallback;
+- `thought_steps`: the router decision, the retrieval result and every tool call with its input and output;
+- `token_usage`: the Gemini calls and their input/output tokens, in total and per call. Each entry in `token_usage.calls` also has an `input`: the `messages` the model received (role `system`, `user`, `assistant` with its `tool_calls`, or `tool` with its `tool_call_id`), the names of the `tools` it was offered, and for the router the `output_schema` it answered in. `UsageCallback.on_chat_model_start()` in `app/agent/usage.py` records it; tool schemas are left out to keep the response small. Gemini keeps no state between calls, so every call is sent its system prompt again; the response stores each distinct prompt once in `token_usage.system_prompts` (keyed `router`, `agent`, ...), and each call's system message is `{"role": "system", "ref": "agent"}`. The rest of each call's messages is listed in full, so you can see the conversation grow turn by turn.
+
+---
+
+## 8. Session Memory
+
+- Keyed by `session_id`, with a 10-turn (20-message) window of clean question and answer pairs.
+- Each saved answer carries the semantic query (or SQL) it used, so follow-ups like "and the month before?" can reuse it.
+- Intermediate tool messages are dropped at the end of a turn, so Gemini never sees orphaned function calls.
+- `GET /api/v1/agent/session/{session_id}` shows a session and `DELETE` resets it.
+
+---
+
+## 9. Security
+
+DuckDB loads every table the LookML references into memory at start, then sets `enable_external_access=false` and `lock_configuration=true`. Agent SQL can't read files (`read_csv`, `read_parquet`, file paths) or change settings, and only `SELECT` and `WITH` statements run.
+
+---
+
+## 10. Testing
+
+- `pytest`: unit tests plus 31 golden questions (`tests/golden/questions.json`) where the compiler's result must match a hand-written reference query. No Gemini calls.
+- `pytest -m live`: the agent answers the golden questions through Gemini and its numbers are checked against the references. Spends credits; `GOLDEN_IDS=spend_sep,aug_vs_sep` limits the run.
+
+---
+
+## 11. Known Limitations
+
+**Small model and the `filters` schema.** On its first `query` call of a turn, gemini-3.5-flash-lite (the `simple_query` model) sometimes ignores the structured `filters` schema, though the schema reaches Gemini correctly as a list of `{field, value}` objects. Two shapes were observed:
+
+- the whole list as one text string, e.g. `["{'field': 'view.field', 'value': 'x'}, {...}"]`, copying the code-like example the prompt used to show;
+- a flat list of alternating fields and values, e.g. `["view.field", "x", "view.other", "y"]`.
+
+Each malformed call cost a retry: one more LLM call and about 2,500 input tokens. Measured in live runs on 2026-10-27, 6 of 14 `query` calls were malformed before the filter examples were rewritten in plain words, and 2 of 6 after (all of them the flat list).
+
+`filters_to_dict` (`app/agent/runner.py`) now reads both shapes, and only when they are unambiguous: a text item only as a JSON or Python literal (`json.loads` / `ast.literal_eval`, nothing evaluated) whose items have exactly a `field` and a `value`; a flat list only when it has even length, every other item is a `view.field` name and no value is one. Everything else returns the usual error. The parsed filters go through the same checks as any other filter, so every field is still validated by the compiler. The trace step notes when filters arrived as text.
+
+If it recurs in another shape, the options are a stronger model for `simple_query` (the `complex_query` model has not shown it) or a simpler `filters` input, such as one `"view.field: expression"` string per filter, rather than more tolerant parsing.

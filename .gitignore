@@ -36,6 +36,9 @@ data/chroma/
 *.duckdb
 *.duckdb.wal
 
+# Agent query traces (contain financial data)
+logs/
+
 # Testing & Coverage
 .pytest_cache/
 .coverage

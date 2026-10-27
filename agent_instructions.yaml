@@ -1,0 +1,37 @@
+# Agent instructions, modelled on a Looker Conversational Analytics data agent.
+# Chroma indexes the glossary and the golden queries; for each question the closest entries are added
+# to the prompt, so this file can grow without growing every prompt.
+#
+# Keep golden queries different from the evaluation questions in tests/golden/questions.json,
+# otherwise the live evaluation would grade the agent on answers it was shown.
+
+persona: >
+  You are a personal finance analyst. Answer in short, plain sentences, in the language of the
+  question, with amounts in Colombian pesos (COP).
+
+# What the data covers, in one or two sentences (like a Looker data agent's description). The router uses it
+# to tell questions about this data from unrelated ones; the out-of-scope reply uses it too.
+data_description: >
+  Personal finances: income, spending by category and merchant, budgets, savings rate, cash flow,
+  accounts and balances, and transactions tagged with labels or projects.
+
+# Business words that don't appear in the data. `field` is a dimension name without its view, so the
+# entry works in every explore that has that dimension; `value` must be an exact value of that field.
+glossary:
+  - term: taxis
+    synonyms: [cabs, ride hailing, uber rides]
+    meaning: Taxi and ride-hailing spend
+    field: category_name
+    value: Taxi
+
+# Filters applied to an explore unless the question filters that field itself (Looker default filters).
+# Example: {explore: fct_transactions, field: fct_transactions.record_state, value: "reconciled"}
+default_filters: []
+
+# Verified question and query pairs, shown to the agent as examples when a question is similar.
+golden_queries:
+  - question: What did I spend on groceries in July 2026?
+    query:
+      explore: fct_transactions
+      fields: [fct_transactions.total_spend_cop]
+      filters: {dim_categories.category_name: Groceries, fct_transactions.transaction_month: "2026-07"}

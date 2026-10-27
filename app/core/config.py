@@ -1,4 +1,5 @@
 import os
+from datetime import date
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -26,6 +27,21 @@ class Settings(BaseSettings):
     RAG_TOP_K: int = 5
     RAG_MIN_SIMILARITY: float = 0.20
     RAG_RELATIVE_CUTOFF_RATIO: float = 0.80
+
+    # Semantic layer agent
+    # Fixed "today" (YYYY-MM-DD) for tests and demos; empty = the real date
+    AGENT_TODAY: str = ""
+    # Let the agent fall back to read-only raw SQL when no explore can answer a question
+    ALLOW_RAW_SQL_FALLBACK: bool = True
+    AGENT_INSTRUCTIONS_PATH: str = "agent_instructions.yaml"  # glossary, default filters, golden queries
+    QUERY_LOG_PATH: str = "logs/agent_queries.jsonl"  # full trace of each agent answer; empty disables it
+    # Number of explores/fields the catalog search returns to the model
+    # Looker-style retrieval per question: explores first, then fields within them, then instructions
+    RETRIEVAL_EXPLORES: int = 3
+    RETRIEVAL_MEASURES: int = 5
+    RETRIEVAL_DIMENSIONS: int = 5
+    RETRIEVAL_GLOSSARY: int = 3
+    RETRIEVAL_GOLDEN_QUERIES: int = 2
 
     # Data paths (pointing to local lakehouse and semantic layer)
     WALLET_DATA_DIR: Path = Path("C:/projects/wallet/data")
@@ -65,6 +81,10 @@ class Settings(BaseSettings):
     @property
     def gold_expense_summary_path(self) -> Path:
         return self.WALLET_DATA_DIR / "gold" / "mart_expense_summary.parquet"
+
+
+    def today(self) -> date:
+        return date.fromisoformat(self.AGENT_TODAY) if self.AGENT_TODAY else date.today()
 
 
 settings = Settings()

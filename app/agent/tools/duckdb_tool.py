@@ -1,6 +1,7 @@
 import time
 import logging
 import math
+from datetime import date
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
 import duckdb
@@ -20,10 +21,17 @@ class DuckDBTool:
     def __init__(self):
         self.conn = duckdb.connect(":memory:")
         self._register_views()
+        self._lock_down()
 
     def _register_views(self):
-        """Register friendly table names pointing directly to parquet data files and LookML derived tables."""
+        """Load the parquet data files into in-memory tables and register LookML derived tables as views.
+
+        The data is loaded into memory (not left as read_parquet views) so that file access
+        can be switched off afterwards; restart the app to pick up new data.
+        """
         import re
+
+        from app.semantic.model import referenced_tables
 
         tables = [
             ("master_records", settings.silver_records_path),
@@ -34,13 +42,23 @@ class DuckDBTool:
             ("mart_monthly_pnl", settings.gold_pnl_path),
             ("mart_expense_summary", settings.gold_expense_summary_path),
         ]
+        # Every other table the LookML references (e.g. mart_category_budget, bridge_transaction_labels),
+        # looked up in the silver and gold layers
+        known = {name for name, _ in tables}
+        try:
+            for name in referenced_tables(settings.LOOKML_DIR):
+                if name not in known:
+                    layer = "gold" if (settings.WALLET_DATA_DIR / "gold" / f"{name}.parquet").exists() else "silver"
+                    tables.append((name, settings.WALLET_DATA_DIR / layer / f"{name}.parquet"))
+        except Exception as e:
+            logger.warning("Could not read table names from LookML: %s", e)
 
         registered = []
         for name, path in tables:
             if path.exists():
                 try:
                     posix_path = path.as_posix()
-                    self.conn.execute(f"CREATE OR REPLACE VIEW {name} AS SELECT * FROM read_parquet('{posix_path}')")
+                    self.conn.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM read_parquet('{posix_path}')")
                     registered.append(name)
                 except Exception as e:
                     logger.error("Failed to register view %s for %s: %s", name, path, e)
@@ -69,6 +87,15 @@ class DuckDBTool:
             logger.warning("Could not register LookML derived table views in DuckDB: %s", e)
 
         logger.info("DuckDB initialized with views: %s", registered)
+
+    def _lock_down(self):
+        """Disable file system, network and extension access, then freeze the configuration.
+
+        Without this, a read-only SELECT could still read any file on the machine
+        (e.g. read_text('.env')), because DuckDB table functions access the file system.
+        """
+        self.conn.execute("SET enable_external_access = false")
+        self.conn.execute("SET lock_configuration = true")
 
     def validate_sql(self, sql: str) -> None:
         """Ensure the SQL query is strictly read-only and safe."""
@@ -192,13 +219,25 @@ class DuckDBTool:
 
         return [str(row[0]) for row in res]
 
+    def get_data_coverage(self) -> Tuple[Optional[date], Optional[date]]:
+        """Return the first and last transaction dates in the ledger."""
+        try:
+            res = self.conn.execute(
+                "SELECT MIN(CAST(date AS DATE)), MAX(CAST(date AS DATE)) FROM master_records"
+            ).fetchall()[0]
+            if res and res[0] and res[1]:
+                return (res[0], res[1])
+        except Exception:
+            pass
+        return (None, None)
+
     def get_temporal_bounds(self) -> Tuple[Optional[str], Optional[str]]:
         """Return (min_period, max_period) across lakehouse gold/silver marts."""
         for tbl in ["mart_monthly_pnl", "mart_expense_summary"]:
             try:
                 res = self.conn.execute(
                     f"SELECT MIN(year_month), MAX(year_month) FROM {tbl}"
-                ).fetchone()
+                ).fetchall()[0]
                 if res and res[0] and res[1]:
                     return (str(res[0]), str(res[1]))
             except Exception:
@@ -207,7 +246,7 @@ class DuckDBTool:
         try:
             res = self.conn.execute(
                 "SELECT MIN(date), MAX(date) FROM master_records"
-            ).fetchone()
+            ).fetchall()[0]
             if res and res[0] and res[1]:
                 return (str(res[0]), str(res[1]))
         except Exception:

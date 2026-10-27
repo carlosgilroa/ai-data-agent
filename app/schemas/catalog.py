@@ -26,13 +26,14 @@ class MetricDefinition(BaseModel):
 class CatalogItem(BaseModel):
     """Unified document representation for ChromaDB vector indexing."""
     id: str = Field(..., description="Unique document ID (e.g. fct_transactions.net_cashflow_eur)")
-    item_type: Literal["dimension", "metric", "table", "view", "explore", "join"] = Field(..., description="Catalog entry type")
+    item_type: Literal["dimension", "metric", "table", "view", "explore", "join", "glossary", "golden_query"] = Field(..., description="Catalog entry type")
     name: str = Field(..., description="Name of the item")
     view: str = Field(..., description="Parent view or table name")
     description: str = Field(..., description="Detailed semantic description used for embeddings")
     sql_formula: Optional[str] = Field(None, description="Associated SQL code/formula")
     table_name: Optional[str] = Field(None, description="Physical parquet or BigQuery table")
     examples: List[str] = Field(default_factory=list, description="Sample user questions this item answers")
+    explores: List[str] = Field(default_factory=list, description="LookML explores in which this field can be queried")
     distance: Optional[float] = Field(None, description="Raw cosine distance from ChromaDB (0.0 = identical)")
     similarity_score: Optional[float] = Field(None, description="Cosine similarity score (1.0 - distance)")
 

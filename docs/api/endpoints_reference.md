@@ -21,6 +21,9 @@ The **AI-Native Semantic Query Agent & RAG Microservice** exposes a RESTful inte
 | `GET` | [`/api/v1/agent/session/{session_id}`](#6-inspect-conversational-session-memory) | Inspect active conversational dialogue turns and message counts | `AI Data Agent` |
 | `DELETE` | [`/api/v1/agent/session/{session_id}`](#7-reset-conversational-session-memory) | Clear multi-turn conversational session memory | `AI Data Agent` |
 | `POST` | [`/api/v1/agent/sql`](#8-direct-read-only-sql-execution) | Execute read-only DuckDB SQL queries with strict AST safety enforcement | `Data Lakehouse` |
+| `POST` | [`/api/v1/semantic/query`](#9-semantic-query-no-llm) | Compile and run a LookML semantic query without calling Gemini | `Semantic Layer` |
+| `GET` | [`/api/v1/semantic/explores`](#10-list-and-describe-explores) | List LookML explores | `Semantic Layer` |
+| `GET` | [`/api/v1/semantic/explores/{explore}`](#10-list-and-describe-explores) | List an explore's visible dimensions and measures | `Semantic Layer` |
 
 ---
 
@@ -147,12 +150,12 @@ Wipes the ChromaDB collection clean (`vector_store.clear()`) and forces a live r
 
 ### `POST /api/v1/agent/query`
 
-The primary interface for natural language analytics. Executes a **Two-Step Intent Router (`gemini-3.1-flash-lite`)** followed by an autonomous **ReAct tool-calling loop**:
-1. Classifies user intent into `out_of_scope` (`0` steps), `capabilities` (`2` steps on `gemini-3.1-flash-lite`), `simple_query` (`6` steps on `gemini-3.5-flash-lite`), or `complex_query` (`8` steps on `gemini-3.8-flash`), simultaneously decomposing the inquiry into a dense `metric_search_phrase` and discrete `entity_keywords`.
-2. Dynamically invokes `search_data_catalog` (filtered by cosine similarity $\ge 0.28$) to discover LookML measures, business rules, and table schemas.
-3. Formulates LookML-aligned SQL and invokes `run_sql_query` against the local DuckDB lakehouse.
-4. Automatically self-corrects SQL if a syntax error or missing column is reported by DuckDB.
-5. Synthesizes an accurate, grounded financial answer with full thought-step traceability.
+The primary interface for natural language analytics:
+1. The intent router classifies the question (`out_of_scope`, `capabilities`, `simple_query` with 5 steps, `complex_query` with 8 steps) and splits it into measures, dimensions, filter values and a time period.
+2. Retrieval picks the best explores and their fields in Chroma, resolves the filter values to exact values in the data (or through the glossary), and adds relevant glossary entries and golden queries to the prompt.
+3. The model calls `query` with an explore, fields and filters; the LookML compiler writes and runs the SQL. Errors come back with suggestions so the model can correct itself.
+4. Only when no explore fits, and `ALLOW_RAW_SQL_FALLBACK=True`, the model may use read-only raw SQL; the answer then says so and `governed` is `false`.
+5. The answer leads with the number in COP and a "Metric:" line, and the response carries everything behind it.
 
 #### Request Body
 ```json
@@ -169,54 +172,58 @@ The primary interface for natural language analytics. Executes a **Two-Step Inte
 | `explain` | `boolean` | No | `true` | If `true`, returns raw table rows (`data`) and intermediate agent reasoning (`thought_steps`) |
 
 #### Successful Response (`200 OK`)
+Example with `AGENT_TODAY=2026-10-26` (SQL and tool outputs shortened):
 ```json
 {
-  "query": "What is my net cashflow and savings rate by month?",
-  "intent": "complex_query",
-  "model_used": "gemini-3.8-flash",
-  "answer": "Based on reconciled monthly P&L records (via LookML mart_monthly_pnl)...",
-  "sql": "SELECT year_month, operating_income, operational_expenses, net_cashflow, savings_rate_pct FROM mart_monthly_pnl ORDER BY year_month ASC LIMIT 12;",
-  "data": [
-    {
-      "year_month": "2026-09",
-      "operating_income": 1351550.0,
-      "operational_expenses": 5522875.06,
-      "net_cashflow": -8926969.0,
-      "savings_rate_pct": -308.6
-    }
+  "query": "How much did I spend last month?",
+  "intent": "simple_query",
+  "model_used": "gemini-3.5-flash-lite",
+  "answer": "You spent 12,417,134 COP in September 2026.\nMetric: total spend, net of refunds, excluding transfers.",
+  "sql": "SELECT COALESCE(SUM(CASE WHEN ... END), 0) - COALESCE(SUM(CASE WHEN ... END), 0) AS \"fct_transactions.total_spend_cop\" FROM master_records AS fct_transactions WHERE ...",
+  "semantic_query": {
+    "explore": "fct_transactions",
+    "fields": ["fct_transactions.total_spend_cop"],
+    "filters": {"fct_transactions.transaction_month": "last month"},
+    "sorts": [],
+    "limit": 500
+  },
+  "fields_used": [
+    {"name": "fct_transactions.total_spend_cop", "kind": "measure", "type": "number", "description": "..."}
   ],
+  "governed": true,
+  "notes": [],
+  "data": [{"fct_transactions.total_spend_cop": 12417133.52}],
   "thought_steps": [
     {
       "step_number": 1,
       "tool": "intent_router",
-      "tool_input": { "query": "What is my net cashflow and savings rate by month?", "router_model": "gemini-3.1-flash-lite" },
-      "tool_output": {
-        "intent": "complex_query",
-        "target_model": "gemini-3.8-flash",
-        "max_iterations": 8,
-        "metric_search_phrase": "net cashflow and monthly savings rate",
-        "entity_keywords": ["cashflow", "savings rate"]
-      },
-      "thought": "Router (gemini-3.1-flash-lite) classified intent as 'complex_query' -> routed to 'gemini-3.8-flash' with max_iterations=6"
+      "tool_input": {"query": "How much did I spend last month?", "router_model": "gemini-3.1-flash-lite"},
+      "tool_output": {"intent": "simple_query", "max_iterations": 5, "measures": ["total spend"], "filter_values": [], "time_period": "last month"},
+      "thought": "..."
     },
     {
       "step_number": 2,
-      "tool": "search_data_catalog",
-      "tool_input": { "query": "net cashflow savings rate monthly" },
-      "tool_output": "[1] net_cash_flow_usd (metric in fct_transactions | Table: master_records | SQL: ${total_income_usd} - ${total_spend_usd} | score: 0.550 (distance: 0.450))...",
-      "thought": "Agent (gemini-3.8-flash) decided to invoke tool 'search_data_catalog'..."
-    },
-    {
-      "step_number": 3,
-      "tool": "run_sql_query",
-      "tool_input": { "sql": "SELECT year_month, operating_income, operational_expenses, net_cashflow, savings_rate_pct FROM mart_monthly_pnl ORDER BY year_month ASC LIMIT 12;" },
-      "tool_output": "{\"columns\": [\"year_month\", \"operating_income\", \"operational_expenses\", \"net_cashflow\", \"savings_rate_pct\"], \"row_count\": 1, \"rows\": [...]}",
-      "thought": "Agent (gemini-3.8-flash) decided to invoke tool 'run_sql_query'..."
+      "tool": "query",
+      "tool_input": {"explore": "fct_transactions", "fields": ["fct_transactions.total_spend_cop"], "filters": [{"field": "fct_transactions.transaction_month", "value": "last month"}]},
+      "tool_output": "{\"fields\": [...], \"row_count\": 1, \"rows\": [{\"fct_transactions.total_spend_cop\": 12417133.52}]}",
+      "thought": "..."
     }
   ],
-  "execution_time_ms": 4820.12
+  "execution_time_ms": 2140.5
 }
 ```
+
+| Field | Description |
+|:---|:---|
+| `semantic_query` | The explore, fields, filters, sorts and limit behind the answer (`null` for the raw SQL fallback) |
+| `fields_used` | The LookML fields used, with their descriptions |
+| `governed` | `true` when the numbers come from LookML metrics, `false` for the raw SQL fallback |
+| `notes` | Caveats, e.g. "2026-10-01 to 2026-10-31 is only partly covered: the data runs through 2026-10-20." |
+| `sql` | The compiled SQL (or the fallback SQL) |
+| `data` | Rows of the last query behind the answer |
+| `token_usage` | `llm_calls`, `input_tokens`, `output_tokens`, `total_tokens`, `system_prompts` and `calls`: one entry per Gemini call with `model`, its token counts and `input` |
+| `token_usage.system_prompts` | Each distinct system prompt once, keyed `router`, `agent` (`agent_2`, ... if a request used another one). Every call is sent its system prompt again; the calls point here instead of repeating it |
+| `token_usage.calls[i].input` | What that call received: `messages` (the system message as `{"role": "system", "ref": "agent"}`, pointing into `system_prompts`; the others with `role` `user`, `assistant` or `tool` and their `content`; assistant messages add `tool_calls`, tool messages add `tool_call_id`), `tools` (names of the tools offered) and, for the router, `output_schema` (`RouterDecision`) |
 
 #### Error Response: Missing LLM Configuration (`400 Bad Request`)
 
@@ -330,6 +337,52 @@ Allows direct SQL execution against registered Parquet views (`master_records`, 
   "detail": "Forbidden SQL operation detected: 'drop'. Queries must be read-only."
 }
 ```
+
+---
+
+## 9. Semantic Query (no LLM)
+
+### `POST /api/v1/semantic/query`
+
+Compiles a LookML semantic query to SQL and runs it, without calling Gemini. Useful to check a metric by hand.
+
+#### Request Body
+```json
+{
+  "explore": "fct_transactions",
+  "fields": ["dim_categories.category_group", "fct_transactions.total_spend_cop"],
+  "filters": {"fct_transactions.transaction_month": "2026-09", "dim_categories.category_group": "-Income"},
+  "sorts": ["fct_transactions.total_spend_cop desc"],
+  "limit": 10
+}
+```
+
+Filter grammar: `Groceries,Rent`, `-Rent`, `%uber%`, `^,` (literal comma), `yes`/`no`, `>1000000`, `[100,500]`, `2026-09`, `2026-Q3`, `2026-01 through 2026-03`, `before 2026-06`, `last month`, `this year`, `last 3 months`.
+
+#### Response (`200 OK`)
+```json
+{
+  "explore": "fct_transactions",
+  "fields": [{"name": "dim_categories.category_group", "kind": "dimension", "type": "string", "description": "..."}, "..."],
+  "filters": {"fct_transactions.transaction_month": "2026-09", "dim_categories.category_group": "-Income"},
+  "sql": "SELECT ...",
+  "row_count": 8,
+  "rows": [{"dim_categories.category_group": "Food & Drinks", "fct_transactions.total_spend_cop": 6709751.14}, "..."],
+  "notes": []
+}
+```
+
+An unknown field, a hidden field or a bad filter returns `400 Bad Request` with suggestions, e.g. `No field 'fct_transactions.total_spend' in explore 'fct_transactions'. Did you mean: fct_transactions.total_spend_cop, ...?`
+
+---
+
+## 10. List and Describe Explores
+
+### `GET /api/v1/semantic/explores`
+Returns `{"explores": [{"name", "label", "description"}, ...]}`.
+
+### `GET /api/v1/semantic/explores/{explore}`
+Returns `{"explore": "...", "fields": [{"name", "kind", "type", "description"}, ...]}` with the visible dimensions and measures. Unknown explores return `404`.
 
 ---
 

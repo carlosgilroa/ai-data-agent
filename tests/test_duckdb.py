@@ -3,7 +3,7 @@ from app.agent.tools.duckdb_tool import duckdb_tool
 
 
 def test_duckdb_views_registered():
-    """Verify DuckDB registers all 7 physical Parquet views and derived LookML PDT views."""
+    """Verify DuckDB loads all 7 physical Parquet tables and derived LookML PDT views."""
     tables = duckdb_tool.get_available_tables()
     expected = {
         "master_records",
@@ -91,3 +91,23 @@ def test_duckdb_get_temporal_bounds():
     assert min_date is not None
     assert max_date is not None
     assert min_date <= max_date
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT length(content) AS n FROM read_text('.env')",
+        "SELECT count(*) AS n FROM read_csv('.env')",
+        "SELECT count(*) AS n FROM read_parquet('data/missing.parquet')",
+    ],
+)
+def test_duckdb_blocks_file_access(sql):
+    """Verify queries cannot read files from disk once the tables are loaded."""
+    with pytest.raises(RuntimeError, match="file system operations are disabled"):
+        duckdb_tool.run_query(sql)
+
+
+def test_duckdb_lockdown_cannot_be_undone():
+    """Verify the file-access lockdown cannot be switched back on from a connection."""
+    with pytest.raises(Exception, match="Cannot change configuration option"):
+        duckdb_tool.conn.execute("SET enable_external_access = true")
