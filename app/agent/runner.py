@@ -133,7 +133,8 @@ def query(
     LookML definitions, so metrics are always computed the governed way.
     explore: explore name, as listed.
     fields: dimensions and measures as view.field, e.g. ['<view>.<dimension>', '<view>.<measure>'].
-    filters: list of {field, value}, e.g. [{'field': '<view>.<time field>_month', 'value': 'last month'}].
+    filters: one entry per filter, each with a field (view.field) and a value (filter expression), e.g. an entry
+    with the explore's ..._month field and the value last month. Pass entries as objects, not as a text string.
     sorts: e.g. ['<view>.<measure> desc']. limit: maximum rows.
     """
     try:

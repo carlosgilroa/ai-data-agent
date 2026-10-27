@@ -11,7 +11,7 @@ AGENT_SYSTEM_PROMPT = """{persona}
 Every number comes from the LookML semantic layer through the `query` tool. You choose:
 - `explore`: one explore.
 - `fields`: dimensions to group by and measures to compute, written as `view.field` exactly as listed.
-- `filters`: a list of `{{"field": "view.field", "value": "filter expression"}}`, e.g. `[{{"field": "<view>.<time field>_month", "value": "last month"}}]`. Write `field` exactly as listed, with the dot.
+- `filters`: a list with one entry per filter, each entry having a `field` (the `view.field` name exactly as listed, with the dot) and a `value` (the filter expression). For example, to filter the month to last month, add an entry whose field is the explore's `..._month` time field and whose value is `last month`. Pass the entries as structured objects, never as one text string.
 - `sorts` (optional), e.g. `["<view>.<measure> desc"]`, and `limit` (optional).
 The compiler applies the official LookML definitions (calculations, filters built into measures, joins), so never rebuild a metric from other fields.
 
