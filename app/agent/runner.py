@@ -1,3 +1,4 @@
+import ast
 import time
 import logging
 import json
@@ -91,16 +92,47 @@ class QueryFilter(BaseModel):
     value: str = PydanticField(..., description="Looker filter expression, e.g. <value>, -<value>, %<text>%, >1000, last month")
 
 
+MAX_FILTER_TEXT = 10_000
+
+
+def parse_filter_text(text: str) -> Optional[List[Dict[str, Any]]]:
+    """Filters a model sent as one text string instead of objects, e.g. "{'field': 'v.f', 'value': 'x'}, {...}".
+    Read only as a literal (JSON or a Python literal; nothing is evaluated) whose items each have exactly a
+    field and a value. Anything else returns None, so the caller reports the usual error.
+    """
+    if len(text) > MAX_FILTER_TEXT:
+        return None
+    for candidate in (text, f"[{text}]"):
+        for parse in (json.loads, ast.literal_eval):
+            try:
+                value = parse(candidate)
+            except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+                continue
+            items = [value] if isinstance(value, dict) else value
+            if isinstance(items, list) and items and all(isinstance(i, dict) and set(i) == {"field", "value"} for i in items):
+                return items
+    return None
+
+
+def filters_sent_as_text(filters: Any) -> bool:
+    return isinstance(filters, list) and any(isinstance(item, str) for item in filters)
+
+
 def filters_to_dict(filters: Any) -> Dict[str, str]:
     """The compiler's {view.field: expression} map from the tool's list of field/value filters.
-    A dict passes through unchanged, so older callers and session examples keep working.
+    A dict passes through unchanged, so older callers and session examples keep working. An item that is
+    text is read with parse_filter_text; the parsed filters are then checked like any others.
     """
     if not filters:
         return {}
     if isinstance(filters, dict):
         return {str(k): str(v) for k, v in filters.items()}
-    result: Dict[str, str] = {}
+    items: List[Any] = []
     for item in filters:
+        parsed = parse_filter_text(item) if isinstance(item, str) else None
+        items.extend(parsed if parsed is not None else [item])
+    result: Dict[str, str] = {}
+    for item in items:
         if isinstance(item, QueryFilter):
             item = item.model_dump()
         if not isinstance(item, dict) or not item.get("field") or item.get("value") is None:
@@ -561,13 +593,20 @@ class AgentRunner:
                 tool_name = tc.get("name")
                 tool_args = tc.get("args") or {}
                 tool_output = self._run_tool(tool_name, tool_args, allowed_tool_names, decision.intent, trace)
+                thought = f"Agent ({target_model}) invoked '{tool_name}' with parameters: {tool_args}"
+                if tool_name == "query" and filters_sent_as_text(tool_args.get("filters")):
+                    logger.info("Model sent query filters as text: %s", tool_args.get("filters"))
+                    thought += (
+                        " Note: the filters arrived as text, not objects; "
+                        + ("they could not be read." if str(tool_output).startswith("Error") else "they were read as a literal list.")
+                    )
                 thought_steps.append(
                     AgentThoughtStep(
                         step_number=step_counter,
                         tool=tool_name or "unknown",
                         tool_input=tool_args,
                         tool_output=tool_output,
-                        thought=f"Agent ({target_model}) invoked '{tool_name}' with parameters: {tool_args}",
+                        thought=thought,
                     )
                 )
                 step_counter += 1

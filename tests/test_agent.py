@@ -840,3 +840,60 @@ def test_follow_up_retrieves_the_standalone_question_and_keeps_previous_filters(
 
     agent_runner.clear_session(session)
     assert session not in agent_runner.last_turns
+
+
+def test_filters_sent_as_text_are_read_only_as_literals():
+    """A model sometimes sends the filter list as one string. It is read only when it is a JSON or Python literal
+    of field/value pairs; anything else keeps the usual error, and the parsed filters are checked like any others."""
+    from app.agent.runner import AgentRunner, _AnswerTrace, filters_to_dict, parse_filter_text
+
+    expected = {"dim_categories.category_name": "Groceries", "fct_transactions.transaction_month": "2026-07"}
+    python_text = "{'field': 'dim_categories.category_name', 'value': 'Groceries'}, {'field': 'fct_transactions.transaction_month', 'value': '2026-07'}"
+    json_text = '[{"field": "dim_categories.category_name", "value": "Groceries"}, {"field": "fct_transactions.transaction_month", "value": "2026-07"}]'
+    assert filters_to_dict([python_text]) == expected
+    assert filters_to_dict([json_text]) == expected
+    assert filters_to_dict([{"field": "dim_categories.category_name", "value": "Groceries"},
+                            "{'field': 'fct_transactions.transaction_month', 'value': '2026-07'}"]) == expected
+
+    for bad in [
+        "{field: 'dim_categories.category_name', value: 'Groceries'}",  # unquoted keys: not a literal
+        "__import__('os').system('echo hi')",
+        "{'field': 'dim_categories.category_name'}",
+        "{'field': 'a.b', 'value': 'x', 'extra': 1}",
+        "Groceries",
+    ]:
+        assert parse_filter_text(bad) is None, bad
+        with pytest.raises(ValueError):
+            filters_to_dict([bad])
+
+    base = {"explore": "fct_transactions", "fields": ["fct_transactions.total_spend_cop"]}
+    trace = _AnswerTrace()
+    output = AgentRunner._run_tool("query", {**base, "filters": [python_text]}, ["query"], "simple_query", trace)
+    assert not output.startswith("Error"), output
+    assert trace.semantic_query["filters"] == expected
+    unknown = AgentRunner._run_tool(
+        "query", {**base, "filters": ["{'field': 'fct_transactions.nope', 'value': 'x'}"]}, ["query"], "simple_query", trace
+    )
+    assert unknown.startswith("Error")
+
+
+def test_trace_notes_filters_that_arrived_as_text(monkeypatch):
+    from app.agent.router import intent_router
+    from app.schemas.query import RouterDecision
+
+    fake = _FakeLLM({
+        "explore": "fct_transactions",
+        "fields": ["fct_transactions.total_spend_cop"],
+        "filters": ["{'field': 'fct_transactions.transaction_month', 'value': '2026-09'}"],
+    })
+    monkeypatch.setattr(agent_runner, "api_key", "test-key")
+    monkeypatch.setattr(agent_runner, "llm_with_tools", fake)
+    monkeypatch.setattr(agent_runner, "_get_or_create_llm", lambda model, tools: (fake, fake))
+    monkeypatch.setattr(intent_router, "classify", lambda query, has_session_context=False, previous=None: RouterDecision(
+        intent="simple_query", reasoning="test", measures=["total spend"]))
+
+    res = agent_runner.run_query(QueryRequest(query="How much did I spend in September 2026?"))
+
+    step = next(s for s in res.thought_steps if s.tool == "query")
+    assert "arrived as text" in step.thought and "were read" in step.thought
+    assert res.semantic_query["filters"] == {"fct_transactions.transaction_month": "2026-09"}
