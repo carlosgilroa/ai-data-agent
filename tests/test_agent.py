@@ -895,5 +895,33 @@ def test_trace_notes_filters_that_arrived_as_text(monkeypatch):
     res = agent_runner.run_query(QueryRequest(query="How much did I spend in September 2026?"))
 
     step = next(s for s in res.thought_steps if s.tool == "query")
-    assert "arrived as text" in step.thought and "were read" in step.thought
+    assert "arrived as text" in step.thought and "were read and checked" in step.thought
     assert res.semantic_query["filters"] == {"fct_transactions.transaction_month": "2026-09"}
+
+
+def test_flat_alternating_filter_list_is_read_only_when_unambiguous():
+    """gemini-3.5-flash-lite also sends filters as ['view.field', 'value', ...]; read only when every other item is
+    a view.field name and the values are not; the result goes through the usual checks."""
+    from app.agent.runner import AgentRunner, _AnswerTrace, filters_to_dict, parse_flat_pairs
+
+    flat = ["dim_categories.category_name", "Groceries", "fct_transactions.transaction_month", "2026-07"]
+    expected = {"dim_categories.category_name": "Groceries", "fct_transactions.transaction_month": "2026-07"}
+    assert filters_to_dict(flat) == expected
+
+    for bad in [
+        ["dim_categories.category_name", "Groceries", "fct_transactions.transaction_month"],  # odd length
+        ["Groceries", "dim_categories.category_name"],  # value first
+        ["dim_categories.category_name", "fct_transactions.transaction_month"],  # two field names
+        ["dim_categories.category_name", 3],
+    ]:
+        assert parse_flat_pairs(bad) is None, bad
+        with pytest.raises(ValueError):
+            filters_to_dict(bad)
+
+    base = {"explore": "fct_transactions", "fields": ["fct_transactions.total_spend_cop"]}
+    trace = _AnswerTrace()
+    output = AgentRunner._run_tool("query", {**base, "filters": flat}, ["query"], "simple_query", trace)
+    assert not output.startswith("Error"), output
+    assert trace.semantic_query["filters"] == expected
+    unknown = AgentRunner._run_tool("query", {**base, "filters": ["fct_transactions.nope", "x"]}, ["query"], "simple_query", trace)
+    assert unknown.startswith("Error")

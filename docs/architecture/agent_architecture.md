@@ -158,3 +158,18 @@ DuckDB loads every table the LookML references into memory at start, then sets `
 
 - `pytest`: unit tests plus 31 golden questions (`tests/golden/questions.json`) where the compiler's result must match a hand-written reference query. No Gemini calls.
 - `pytest -m live`: the agent answers the golden questions through Gemini and its numbers are checked against the references. Spends credits; `GOLDEN_IDS=spend_sep,aug_vs_sep` limits the run.
+
+---
+
+## 11. Known Limitations
+
+**Small model and the `filters` schema.** On its first `query` call of a turn, gemini-3.5-flash-lite (the `simple_query` model) sometimes ignores the structured `filters` schema, though the schema reaches Gemini correctly as a list of `{field, value}` objects. Two shapes were observed:
+
+- the whole list as one text string, e.g. `["{'field': 'view.field', 'value': 'x'}, {...}"]`, copying the code-like example the prompt used to show;
+- a flat list of alternating fields and values, e.g. `["view.field", "x", "view.other", "y"]`.
+
+Each malformed call cost a retry: one more LLM call and about 2,500 input tokens. Measured in live runs on 2026-10-27, 6 of 14 `query` calls were malformed before the filter examples were rewritten in plain words, and 2 of 6 after (all of them the flat list).
+
+`filters_to_dict` (`app/agent/runner.py`) now reads both shapes, and only when they are unambiguous: a text item only as a JSON or Python literal (`json.loads` / `ast.literal_eval`, nothing evaluated) whose items have exactly a `field` and a `value`; a flat list only when it has even length, every other item is a `view.field` name and no value is one. Everything else returns the usual error. The parsed filters go through the same checks as any other filter, so every field is still validated by the compiler. The trace step notes when filters arrived as text.
+
+If it recurs in another shape, the options are a stronger model for `simple_query` (the `complex_query` model has not shown it) or a simpler `filters` input, such as one `"view.field: expression"` string per filter, rather than more tolerant parsing.

@@ -1,4 +1,5 @@
 import ast
+import re
 import time
 import logging
 import json
@@ -92,7 +93,13 @@ class QueryFilter(BaseModel):
     value: str = PydanticField(..., description="Looker filter expression, e.g. <value>, -<value>, %<text>%, >1000, last month")
 
 
+# Small-model limitation: gemini-3.5-flash-lite sometimes ignores the structured `filters` schema on its first
+# `query` call of a turn. Two unambiguous shapes are read here, then checked like any other filter:
+#   - the list as one text literal: ["{'field': 'v.f', 'value': 'x'}, {...}"]
+#   - a flat list of alternating fields and values: ['v.f', 'x', 'v.g', 'y']
+# Measured rates and the options if it recurs: "Known Limitations" in docs/architecture/agent_architecture.md.
 MAX_FILTER_TEXT = 10_000
+FIELD_NAME = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 
 
 def parse_filter_text(text: str) -> Optional[List[Dict[str, Any]]]:
@@ -114,14 +121,27 @@ def parse_filter_text(text: str) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
+def parse_flat_pairs(items: List[Any]) -> Optional[List[Dict[str, str]]]:
+    """A flat list of alternating fields and values, e.g. ['v.f', 'x', 'v.g', 'y'], as field/value filters.
+    Only when the list is all text, has an even length and every other item is a view.field name; else None.
+    """
+    if not items or len(items) % 2 or not all(isinstance(i, str) for i in items):
+        return None
+    fields, values = items[0::2], items[1::2]
+    if not all(FIELD_NAME.match(f.strip()) for f in fields) or any(FIELD_NAME.match(v.strip()) for v in values):
+        return None
+    return [{"field": f.strip(), "value": v} for f, v in zip(fields, values)]
+
+
 def filters_sent_as_text(filters: Any) -> bool:
     return isinstance(filters, list) and any(isinstance(item, str) for item in filters)
 
 
 def filters_to_dict(filters: Any) -> Dict[str, str]:
     """The compiler's {view.field: expression} map from the tool's list of field/value filters.
-    A dict passes through unchanged, so older callers and session examples keep working. An item that is
-    text is read with parse_filter_text; the parsed filters are then checked like any others.
+    A dict passes through unchanged, so older callers and session examples keep working. Text a small model
+    sent instead of objects is read with parse_filter_text or parse_flat_pairs; the result is then checked
+    like any other filter.
     """
     if not filters:
         return {}
@@ -131,6 +151,8 @@ def filters_to_dict(filters: Any) -> Dict[str, str]:
     for item in filters:
         parsed = parse_filter_text(item) if isinstance(item, str) else None
         items.extend(parsed if parsed is not None else [item])
+    if all(isinstance(item, str) for item in items):
+        items = parse_flat_pairs(items) or items
     result: Dict[str, str] = {}
     for item in items:
         if isinstance(item, QueryFilter):
@@ -598,7 +620,7 @@ class AgentRunner:
                     logger.info("Model sent query filters as text: %s", tool_args.get("filters"))
                     thought += (
                         " Note: the filters arrived as text, not objects; "
-                        + ("they could not be read." if str(tool_output).startswith("Error") else "they were read as a literal list.")
+                        + ("they could not be read." if str(tool_output).startswith("Error") else "they were read and checked like any other filter.")
                     )
                 thought_steps.append(
                     AgentThoughtStep(
