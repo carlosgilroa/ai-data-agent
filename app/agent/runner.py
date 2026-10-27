@@ -344,9 +344,8 @@ class AgentRunner:
                 "model": model_name,
                 "google_api_key": self.api_key,
                 "callbacks": [UsageCallback(model_name)],
+                "temperature": 0.2 if "3.5-flash-lite" in model_name else 0.1,
             }
-            if "3.5-flash-lite" not in model_name:
-                llm_kwargs["temperature"] = 0.1
             self._model_cache[model_name] = ChatGoogleGenerativeAI(**llm_kwargs)
         base_llm = self._model_cache[model_name]
         tools_to_bind = tool_declarations(allowed_tool_names)
