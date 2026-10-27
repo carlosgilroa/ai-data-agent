@@ -180,9 +180,10 @@ def _semantic_tool_output(result: Dict[str, Any]) -> str:
     return json.dumps(payload, default=str)
 
 
-def _format_retrieval(retrieval: Retrieval, decision: Any) -> str:
+def _format_retrieval(retrieval: Retrieval, decision: Any, previous_query: Optional[Dict[str, Any]] = None) -> str:
     """The per-question context, in LookML terms: explores, fields, resolved filter values, time,
     glossary and golden queries. Only what retrieval found is shown, so the prompt stays small.
+    For a follow-up, the previous query's explore and filters are listed as already resolved.
     """
     model = semantic_layer.model
     lines = ["### Context for this question"]
@@ -215,6 +216,13 @@ def _format_retrieval(retrieval: Retrieval, decision: Any) -> str:
             )
             via = " (from the glossary)" if value["source"] == "glossary" else ""
             lines.append(f'- "{value["value"]}"{via}: {found}')
+    if previous_query and previous_query.get("explore"):
+        previous_filters = filters_to_dict(previous_query.get("filters"))
+        lines.append(
+            f"Previous question's query (explore {previous_query['explore']}); its filter values are already "
+            "resolved, keep them unless this question changes them:"
+        )
+        lines += [f"- {f} = {v!r}" for f, v in previous_filters.items()] or ["- no filters"]
     if decision.time_period:
         lines.append(f'Time period asked: "{decision.time_period}" (use it as the filter on the explore\'s time field).')
     if retrieval.glossary:
@@ -299,6 +307,8 @@ class AgentRunner:
         self.llm_with_tools = None
         self.init_error = None
         self.sessions: Dict[str, List[Any]] = {}
+        # Each session's last question and its semantic query, for the router to resolve follow-ups
+        self.last_turns: Dict[str, Dict[str, Any]] = {}
         self._model_cache: Dict[str, Any] = {}
         self._init_llm()
 
@@ -390,9 +400,13 @@ class AgentRunner:
             history = history[-max_dialogue_messages:]
 
         self.sessions[session_id] = history
+        self.last_turns[session_id] = {"question": user_query, "semantic_query": last_semantic_query}
 
-    def _system_prompt(self, decision, question: str) -> Tuple[str, Retrieval]:
-        """Base prompt plus the per-question context: dates, data coverage and what retrieval found."""
+    def _system_prompt(
+        self, decision, question: str, previous_query: Optional[Dict[str, Any]] = None
+    ) -> Tuple[str, Retrieval]:
+        """Base prompt plus the per-question context: dates, data coverage, what retrieval found and,
+        for a follow-up, the previous query's explore and filters."""
         instructions = semantic_layer.instructions
         prompt = AGENT_SYSTEM_PROMPT.format(
             persona=instructions.persona.strip() or DEFAULT_PERSONA,
@@ -409,7 +423,7 @@ class AgentRunner:
             dimension_phrase=" ".join(decision.dimensions),
             filter_values=decision.filter_values,
         )
-        context += "\n\n" + _format_retrieval(retrieval, decision)
+        context += "\n\n" + _format_retrieval(retrieval, decision, previous_query)
         return prompt + context, retrieval
 
     def run_query(self, request: QueryRequest) -> QueryResponse:
@@ -449,7 +463,10 @@ class AgentRunner:
         # -----------------------------------------------------------------
         # Step 1: Intent routing
         # -----------------------------------------------------------------
-        decision = intent_router.classify(request.query, has_session_context=has_session_context)
+        previous = self.last_turns.get(session_id) if has_session_context else None
+        decision = intent_router.classify(request.query, has_session_context=has_session_context, previous=previous)
+        # Retrieval searches the follow-up rewritten as a full question, so it finds what the history implies
+        question = (decision.standalone_question or "").strip() or request.query
         target_model, max_iterations, allowed_tool_names = intent_router.get_route_config(decision.intent)
 
         step_counter = 1
@@ -467,6 +484,7 @@ class AgentRunner:
                     "max_iterations": max_iterations,
                     "allowed_tools": allowed_tool_names,
                     "reasoning": decision.reasoning,
+                    "standalone_question": decision.standalone_question,
                     "measures": decision.measures,
                     "dimensions": decision.dimensions,
                     "filter_values": decision.filter_values,
@@ -501,12 +519,14 @@ class AgentRunner:
             self._save_session_turn(session_id, request.query, answer)
             return self._response(request, decision.intent, target_model, answer, trace, thought_steps, start_time)
 
-        system_prompt, retrieval = self._system_prompt(decision, request.query)
+        previous_query = previous.get("semantic_query") if previous else None
+        system_prompt, retrieval = self._system_prompt(decision, question, previous_query)
         thought_steps.append(
             AgentThoughtStep(
                 step_number=step_counter,
                 tool="retrieval",
                 tool_input={
+                    "question": question,
                     "measures": decision.measures,
                     "dimensions": decision.dimensions,
                     "filter_values": decision.filter_values,
@@ -633,6 +653,7 @@ class AgentRunner:
 
     def clear_session(self, session_id: str) -> bool:
         """Clear conversation history for a given session ID."""
+        self.last_turns.pop(session_id, None)
         if session_id in self.sessions:
             del self.sessions[session_id]
             return True

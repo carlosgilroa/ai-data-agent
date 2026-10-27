@@ -367,7 +367,7 @@ def test_agent_loop_with_fake_llm_is_traceable(monkeypatch):
     monkeypatch.setattr(
         intent_router,
         "classify",
-        lambda query, has_session_context=False: RouterDecision(
+        lambda query, has_session_context=False, previous=None: RouterDecision(
             intent="simple_query", reasoning="test", measures=["total spend"], time_period="2026-10"
         ),
     )
@@ -479,12 +479,12 @@ def test_prompts_name_no_dataset():
     agent_instructions.yaml (data_description), the only place for dataset-specific wording."""
     import json as _json
     from app.agent.prompts import AGENT_SYSTEM_PROMPT, DEFAULT_PERSONA, RAW_SQL_DISABLED, RAW_SQL_ENABLED
-    from app.agent.router import ROUTER_SYSTEM_PROMPT, data_description
+    from app.agent.router import FOLLOW_UP_PROMPT, ROUTER_SYSTEM_PROMPT, data_description
     from app.agent.runner import tool_declarations
     from app.schemas.query import RouterDecision
 
     fixed_text = "\n".join([
-        ROUTER_SYSTEM_PROMPT,
+        ROUTER_SYSTEM_PROMPT, FOLLOW_UP_PROMPT,
         _json.dumps(RouterDecision.model_json_schema()),
         AGENT_SYSTEM_PROMPT, DEFAULT_PERSONA, RAW_SQL_ENABLED, RAW_SQL_DISABLED,
         _json.dumps(tool_declarations(list(TOOL_REGISTRY))),
@@ -738,3 +738,105 @@ def test_measure_first_fields_are_labelled_like_dimension_first():
     assert [f["name"] for f in measure_first["fields"]] == [dim, measure]
     assert all(isinstance(row[dim], str) for row in measure_first["rows"])
     assert all(isinstance(row[measure], (int, float)) for row in measure_first["rows"] if row[measure] is not None)
+
+
+class _FakeRouterLLM:
+    """Stands in for the router's structured Gemini call: records the messages and returns a fixed decision."""
+
+    def __init__(self, decision):
+        self.decision = decision
+        self.messages = None
+
+    def invoke(self, messages):
+        self.messages = messages
+        return self.decision
+
+
+def test_router_gets_the_previous_turn_for_a_follow_up(monkeypatch):
+    """With a previous turn, the router prompt carries its question and semantic query, and the decision's
+    standalone question comes back from the same call."""
+    from app.agent.router import intent_router
+    from app.schemas.query import RouterDecision
+
+    decision = RouterDecision(
+        intent="simple_query", reasoning="follow-up", standalone_question="How much did I spend in August 2026?",
+        measures=["total spend"], time_period="2026-08",
+    )
+    fake = _FakeRouterLLM(decision)
+    monkeypatch.setattr(intent_router, "_ensure_llm", lambda: None)
+    monkeypatch.setattr(intent_router, "structured_llm", fake)
+    previous = {
+        "question": "How much did I spend in September 2026?",
+        "semantic_query": {"explore": "fct_transactions", "fields": ["fct_transactions.total_spend_cop"],
+                           "filters": {"fct_transactions.transaction_month": "2026-09"}},
+    }
+
+    result = intent_router.classify("and in August?", has_session_context=True, previous=previous)
+
+    assert result.standalone_question == "How much did I spend in August 2026?"
+    system = fake.messages[0].content
+    assert "How much did I spend in September 2026?" in system
+    assert "fct_transactions.transaction_month" in system and "standalone_question" in system
+    assert fake.messages[-1].content == "and in August?"
+
+    intent_router.classify("How much did I spend?")
+    assert "standalone_question" not in fake.messages[0].content
+
+
+def test_follow_up_retrieves_the_standalone_question_and_keeps_previous_filters(monkeypatch):
+    """Second turn of a session: the router receives the first turn, retrieval searches the standalone question,
+    and the agent's context lists the previous query's explore and filters as already resolved."""
+    import app.agent.runner as runner_module
+    from app.agent.router import intent_router
+    from app.schemas.query import RouterDecision
+
+    session = "test-session-follow-up-rewrite"
+    agent_runner.clear_session(session)
+    first_query = {
+        "explore": "fct_transactions",
+        "fields": ["fct_transactions.total_spend_cop"],
+        "filters": [
+            {"field": "dim_categories.category_name", "value": "Groceries"},
+            {"field": "fct_transactions.transaction_month", "value": "2026-09"},
+        ],
+    }
+    fake = _FakeLLM(first_query)
+    system_prompts = []
+    fake_invoke = fake.invoke
+    monkeypatch.setattr(fake, "invoke", lambda messages: system_prompts.append(messages[0].content) or fake_invoke(messages))
+    monkeypatch.setattr(agent_runner, "api_key", "test-key")
+    monkeypatch.setattr(agent_runner, "llm_with_tools", fake)
+    monkeypatch.setattr(agent_runner, "_get_or_create_llm", lambda model, tools: (fake, fake))
+
+    router_calls = []
+
+    def classify(query, has_session_context=False, previous=None):
+        router_calls.append(previous)
+        standalone = "Spend on the same category in August 2026" if previous else query
+        return RouterDecision(intent="simple_query", reasoning="test", standalone_question=standalone,
+                              measures=["total spend"])
+
+    monkeypatch.setattr(intent_router, "classify", classify)
+    retrieved = []
+    real_retrieve = runner_module.retrieve
+    monkeypatch.setattr(runner_module, "retrieve", lambda q, **kw: retrieved.append(q) or real_retrieve(q, **kw))
+
+    agent_runner.run_query(QueryRequest(query="Spend on that category in September 2026", session_id=session))
+    fake.calls = 0
+    res = agent_runner.run_query(QueryRequest(query="and in August?", session_id=session))
+
+    assert router_calls[0] is None
+    assert router_calls[1]["question"] == "Spend on that category in September 2026"
+    assert router_calls[1]["semantic_query"]["filters"] == {
+        "dim_categories.category_name": "Groceries", "fct_transactions.transaction_month": "2026-09",
+    }
+    assert retrieved == ["Spend on that category in September 2026", "Spend on the same category in August 2026"]
+    routed = next(s for s in res.thought_steps if s.tool == "intent_router").tool_output
+    assert routed["standalone_question"] == "Spend on the same category in August 2026"
+    assert "Previous question's query" not in system_prompts[0]
+    follow_up_context = system_prompts[-1]
+    assert "Previous question's query (explore fct_transactions)" in follow_up_context
+    assert "- dim_categories.category_name = 'Groceries'" in follow_up_context
+
+    agent_runner.clear_session(session)
+    assert session not in agent_runner.last_turns

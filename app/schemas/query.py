@@ -9,6 +9,10 @@ class RouterDecision(BaseModel):
     """Structured output of the intent router: the intent plus the question split in LookML terms."""
     intent: IntentType = Field(..., description="Classified query intent category")
     reasoning: str = Field(..., description="Concise explanation for the chosen intent")
+    standalone_question: Optional[str] = Field(
+        default=None,
+        description="The message rewritten as a full question that needs no conversation history, when it is a follow-up; otherwise the message unchanged.",
+    )
     measures: List[str] = Field(
         default_factory=list,
         description="What to calculate, in the user's words (e.g. ['<measure>']).",

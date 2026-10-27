@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import Tuple, List, Optional
+from typing import Any, Dict, Tuple, List, Optional
 from langchain_core.messages import SystemMessage, HumanMessage
 from app.agent.usage import UsageCallback
 from app.core.config import settings
@@ -37,6 +37,16 @@ The data it can answer about: {data}
    - "time_period": the period as a filter phrase, e.g. "last month", "this year", "2026-09", "2026-08, 2026-09".
    Example: "What was <measure> for <value> last month?" -> measures ["<measure>"], dimensions [], filter_values ["<value>"], time_period "last month".
    Example: "Top <dimension> by <measure> this year" -> measures ["<measure>"], dimensions ["<dimension>"], filter_values [], time_period "this year".
+"""
+
+# Added when the session has a previous question, so a follow-up is resolved in the same router call
+FOLLOW_UP_PROMPT = """
+3. The message continues a conversation. The previous question was: {question}
+   The semantic query that answered it: {semantic_query}
+   If the message depends on the previous question (e.g. it changes only the period, a value or the breakdown), set
+   "standalone_question" to the message rewritten as a full question that needs no history, keeping from the previous
+   question everything the message doesn't change. Then fill measures, dimensions, filter_values and time_period from
+   that standalone question. If the message stands on its own, set "standalone_question" to the message unchanged.
 """
 
 
@@ -91,8 +101,14 @@ class IntentRouter:
             self.llm = None
             self.structured_llm = None
 
-    def classify(self, query: str, has_session_context: bool = False) -> RouterDecision:
-        """Classify user query into an IntentType and extract semantic search parameters using gemini-3.1-flash-lite."""
+    def classify(
+        self, query: str, has_session_context: bool = False, previous: Optional[Dict[str, Any]] = None
+    ) -> RouterDecision:
+        """Classify user query into an IntentType and extract semantic search parameters using gemini-3.1-flash-lite.
+
+        `previous` ({"question", "semantic_query"}) is the session's last turn: the router then also rewrites a
+        follow-up as a standalone question, in the same call.
+        """
         self._ensure_llm()
         if self.structured_llm is None:
             raise RuntimeError(
@@ -100,11 +116,16 @@ class IntentRouter:
                 "to execute the intent router."
             )
 
-        context_hint = (
-            "\n(Note: This message is a follow-up within an active conversation session.)"
-            if has_session_context
-            else ""
-        )
+        if previous and previous.get("question"):
+            semantic_query = previous.get("semantic_query")
+            context_hint = FOLLOW_UP_PROMPT.format(
+                question=json.dumps(previous["question"], ensure_ascii=False),
+                semantic_query=json.dumps(semantic_query, ensure_ascii=False) if semantic_query else "none",
+            )
+        elif has_session_context:
+            context_hint = "\n(Note: This message is a follow-up within an active conversation session.)"
+        else:
+            context_hint = ""
         messages = [
             SystemMessage(content=ROUTER_SYSTEM_PROMPT.format(data=data_description()) + context_hint),
             HumanMessage(content=query),
@@ -127,7 +148,7 @@ class IntentRouter:
                     HumanMessage(
                         content=(
                             'Respond ONLY with valid JSON: {"intent": "out_of_scope"|"capabilities"|"simple_query"|"complex_query", '
-                            '"reasoning": "...", "measures": ["..."], "dimensions": ["..."], "filter_values": ["..."], "time_period": "..."}'
+                            '"reasoning": "...", "standalone_question": "...", "measures": ["..."], "dimensions": ["..."], "filter_values": ["..."], "time_period": "..."}'
                         )
                     )
                 ]
@@ -139,6 +160,7 @@ class IntentRouter:
                 return RouterDecision(
                     intent=parsed.get("intent", "simple_query"),
                     reasoning=parsed.get("reasoning", "Parsed via JSON fallback."),
+                    standalone_question=parsed.get("standalone_question"),
                     measures=parsed.get("measures") or [],
                     dimensions=parsed.get("dimensions") or [],
                     filter_values=parsed.get("filter_values") or [],
