@@ -721,3 +721,20 @@ def test_default_filters_apply_unless_the_query_sets_the_field(monkeypatch):
 
     own = semantic_layer.run(q.model_copy(update={"filters": {"fct_transactions.record_state": "cleared"}}))
     assert not any(n.startswith("Default filter") for n in own["notes"])
+
+
+def test_measure_first_fields_are_labelled_like_dimension_first():
+    """The SELECT lists dimensions before measures; the columns (and fields used) must follow that order,
+    so asking for [measure, dimension] gives the same correctly labelled rows as [dimension, measure]."""
+    from app.semantic.compiler import SemanticQuery
+    from app.semantic.service import semantic_layer
+
+    dim, measure = "dim_categories.category_group", "fct_transactions.total_spend_cop"
+    base = {"explore": "fct_transactions", "filters": {"fct_transactions.transaction_month": "2026-07"}}
+    dim_first = semantic_layer.run(SemanticQuery(**base, fields=[dim, measure]))
+    measure_first = semantic_layer.run(SemanticQuery(**base, fields=[measure, dim]))
+
+    assert dim_first["rows"] and measure_first["rows"] == dim_first["rows"]
+    assert [f["name"] for f in measure_first["fields"]] == [dim, measure]
+    assert all(isinstance(row[dim], str) for row in measure_first["rows"])
+    assert all(isinstance(row[measure], (int, float)) for row in measure_first["rows"] if row[measure] is not None)

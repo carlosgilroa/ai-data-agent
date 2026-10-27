@@ -120,7 +120,8 @@ class Compiler:
         limit = max(1, min(int(query.limit or DEFAULT_LIMIT), MAX_LIMIT))
         sql.append(f"LIMIT {limit}")
 
-        return CompiledQuery(sql="\n".join(sql), explore=explore.name, fields=selected, date_filters=date_filters)
+        # Fields in SELECT order (dimensions, then measures), so columns label each value correctly
+        return CompiledQuery(sql="\n".join(sql), explore=explore.name, fields=dims + measures, date_filters=date_filters)
 
     # ------------------------------------------------------------------ helpers
 
