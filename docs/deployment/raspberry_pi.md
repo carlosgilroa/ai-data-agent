@@ -34,6 +34,13 @@ GEMINI_MODEL=gemini-3.8-flash
 MAX_INPUT_TOKENS_PER_QUESTION=40000
 ```
 
+After editing `.env`, recreate the container so it reads the file again; `docker compose restart`
+keeps the old environment:
+
+```bash
+ssh pi 'cd ~/projects/ai-data-agent && docker compose up -d --force-recreate'
+```
+
 ## Deploying
 
 From the laptop, after the change is merged to main:
