@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     LOOKML_DIR: Path = Path("C:/projects/wallet-lookml")
     CHROMA_PERSIST_DIR: str = "data/chroma"
 
+    # Conversation memory (SQLite), kept across restarts: last turns per session, expired after inactivity
+    SESSION_DB_PATH: str = "data/sessions.db"
+    SESSION_MAX_TURNS: int = 10
+    SESSION_TTL_HOURS: float = 168.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

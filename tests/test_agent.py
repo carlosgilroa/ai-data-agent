@@ -121,11 +121,9 @@ def test_session_clear_endpoint():
 
     test_session = "test-session-suite-1"
     # Seed session
-    agent_runner.sessions[test_session] = [
-        HumanMessage(content="What were my expenses in January 2026?"),
-        AIMessage(content="Your total expenses were $2,500,000 COP.")
-    ]
-    assert test_session in agent_runner.sessions
+    agent_runner._save_session_turn(test_session, "What were my expenses in January 2026?",
+                                    "Your total expenses were $2,500,000 COP.")
+    assert agent_runner.memory.has(test_session)
 
     # Call delete endpoint
     response = client.delete(f"/api/v1/agent/session/{test_session}")
@@ -133,7 +131,7 @@ def test_session_clear_endpoint():
     data = response.json()
     assert data["session_id"] == test_session
     assert data["cleared"] is True
-    assert test_session not in agent_runner.sessions
+    assert not agent_runner.memory.has(test_session)
 
     # Call delete endpoint again on non-existent session
     response2 = client.delete(f"/api/v1/agent/session/{test_session}")
@@ -261,7 +259,7 @@ def test_session_memory_turn_validation_safety():
         last_sql="SELECT year_month, net_spent FROM mart_expense_summary",
     )
 
-    history = agent_runner.sessions[test_session]
+    history = agent_runner.session_history(test_session)
     assert len(history) == 4
     # Ensure all messages are alternating HumanMessage and AIMessage, and no ToolMessage exists
     assert isinstance(history[0], HumanMessage)
@@ -321,7 +319,7 @@ def test_session_memory_keeps_semantic_query_for_follow_ups():
         last_sql="SELECT ...",
         last_semantic_query={"explore": "mart_monthly_pnl", "fields": ["mart_monthly_pnl.total_spend_cop"]},
     )
-    content = agent_runner.sessions[test_session][1].content
+    content = agent_runner.session_history(test_session)[1].content
     assert "Semantic query used:" in content
     assert "mart_monthly_pnl.total_spend_cop" in content
     agent_runner.clear_session(test_session)
@@ -418,12 +416,10 @@ def test_token_usage_is_tracked_per_request():
     assert [c["model"] for c in usage["calls"]] == ["router", "main"]
 
 
-def test_token_usage_records_each_calls_input():
-    """Each call in token_usage carries the messages it received and the names of the tools offered."""
-    import uuid
+def test_token_usage_has_counts_but_no_prompts():
+    """token_usage reports models and token counts only; the prompts sent to each call are not returned."""
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-    from langchain_core.outputs import ChatGeneration, LLMResult
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
     from app.agent.usage import UsageCallback, start_tracking, summarize
 
     usage_metadata = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
@@ -433,45 +429,10 @@ def test_token_usage_records_each_calls_input():
     )
     model.invoke([SystemMessage(content="You are an analyst."), HumanMessage(content="How much?")])
 
-    # A later turn of the tool loop, with the tools offered the way the Gemini integration passes them
-    callback, run_id = UsageCallback("main"), uuid.uuid4()
-    turn = [
-        HumanMessage(content="How much?"),
-        AIMessage(content="", tool_calls=[{"name": "query", "args": {"explore": "e"}, "id": "c1"}]),
-        ToolMessage(content='{"rows": []}', tool_call_id="c1", name="query"),
-    ]
-    callback.on_chat_model_start(
-        {}, [turn], run_id=run_id,
-        invocation_params={"tools": [{"function_declarations": [{"name": "query"}, {"name": "get_explores"}]}]},
-    )
-    callback.on_llm_end(
-        LLMResult(generations=[[ChatGeneration(message=AIMessage(content="done", usage_metadata=usage_metadata))]]),
-        run_id=run_id,
-    )
-
-    first, second = summarize(calls)["calls"]
-    assert first["input"]["messages"] == [
-        {"role": "system", "ref": "agent"},
-        {"role": "user", "content": "How much?"},
-    ]
-    assert first["input"]["tools"] == []
-    assert second["input"]["tools"] == ["query", "get_explores"]
-    assistant, tool_msg = second["input"]["messages"][1:]
-    assert assistant["tool_calls"] == [{"name": "query", "args": {"explore": "e"}}]
-    assert tool_msg == {"role": "tool", "content": '{"rows": []}', "tool_call_id": "c1", "name": "query"}
-    assert not callback._inputs  # nothing left behind once the call ended
-
-    # The router answers in a JSON schema instead of calling tools; its name is recorded
-    router, run_id = UsageCallback("router"), uuid.uuid4()
-    router.on_chat_model_start(
-        {}, [[HumanMessage(content="How much?")]], run_id=run_id,
-        invocation_params={"response_json_schema": {"title": "RouterDecision", "type": "object"}},
-    )
-    router.on_llm_end(
-        LLMResult(generations=[[ChatGeneration(message=AIMessage(content="{}", usage_metadata=usage_metadata))]]),
-        run_id=run_id,
-    )
-    assert calls[-1]["input"]["output_schema"] == "RouterDecision"
+    usage = summarize(calls)
+    assert set(usage) == {"llm_calls", "input_tokens", "output_tokens", "total_tokens", "calls"}
+    assert usage["calls"] == [{"model": "fake", "input_tokens": 10, "output_tokens": 2, "total_tokens": 12}]
+    assert "You are an analyst." not in str(usage)
 
 
 def test_prompts_name_no_dataset():
@@ -520,7 +481,6 @@ def test_tool_descriptions_are_sent_once():
     from langchain_google_genai import ChatGoogleGenerativeAI
     from langchain_google_genai._function_utils import convert_to_genai_function_declarations
     from app.agent.runner import tool_declarations
-    from app.agent.usage import _tool_names
 
     llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key="test-key")
     bound = llm.bind_tools(tool_declarations(list(TOOL_REGISTRY)))
@@ -530,7 +490,6 @@ def test_tool_descriptions_are_sent_once():
     declarations = [d for tool in sent for d in tool.function_declarations]
 
     assert [d.name for d in declarations] == list(TOOL_REGISTRY)
-    assert _tool_names(params) == list(TOOL_REGISTRY)
     for d in declarations:
         assert d.description
         assert not (d.parameters and d.parameters.description), f"{d.name} repeats its description on its parameters"
@@ -564,31 +523,6 @@ def test_retrieval_trace_carries_similarity_scores():
 
     prompt = _format_retrieval(r, SimpleNamespace(time_period="last month"))
     assert "score" not in prompt.lower()
-
-
-def test_token_usage_stores_each_system_prompt_once():
-    """Calls that repeat a system prompt point to one stored copy; a different prompt gets its own key."""
-    from app.agent.usage import summarize
-
-    def call(system, output_schema=None, extra=()):
-        call_input = {"messages": [{"role": "system", "content": system}, {"role": "user", "content": "Q"}, *extra], "tools": []}
-        if output_schema:
-            call_input["output_schema"] = output_schema
-        return {"model": "m", "input_tokens": 1, "output_tokens": 1, "total_tokens": 2, "input": call_input}
-
-    tool_turn = ({"role": "assistant", "content": "", "tool_calls": [{"name": "query", "args": {}}]},)
-    usage = summarize([
-        call("Route it.", output_schema="RouterDecision"),
-        call("Answer it."),
-        call("Answer it.", extra=tool_turn),
-        call("Decline politely."),
-    ])
-    assert usage["system_prompts"] == {"router": "Route it.", "agent": "Answer it.", "agent_2": "Decline politely."}
-    refs = [c["input"]["messages"][0] for c in usage["calls"]]
-    assert refs == [{"role": "system", "ref": r} for r in ["router", "agent", "agent", "agent_2"]]
-    assert usage["calls"][2]["input"]["messages"][2]["tool_calls"][0]["name"] == "query"  # the loop's growth stays visible
-    assert usage["calls"][0]["input"]["output_schema"] == "RouterDecision"
-    assert summarize([])["calls"] == [] and "system_prompts" not in summarize([])
 
 
 def test_field_values_flag_a_cut_off_list():
@@ -780,7 +714,7 @@ def test_router_gets_the_previous_turn_for_a_follow_up(monkeypatch):
     assert fake.messages[-1].content == "and in August?"
 
     intent_router.classify("How much did I spend?")
-    assert "standalone_question" not in fake.messages[0].content
+    assert "continues a conversation" not in fake.messages[0].content  # no follow-up section on a first turn
 
 
 def test_follow_up_retrieves_the_standalone_question_and_keeps_previous_filters(monkeypatch):
@@ -839,7 +773,7 @@ def test_follow_up_retrieves_the_standalone_question_and_keeps_previous_filters(
     assert "- dim_categories.category_name = 'Groceries'" in follow_up_context
 
     agent_runner.clear_session(session)
-    assert session not in agent_runner.last_turns
+    assert not agent_runner.memory.has(session)
 
 
 def test_filters_sent_as_text_are_read_only_as_literals():
@@ -925,3 +859,60 @@ def test_flat_alternating_filter_list_is_read_only_when_unambiguous():
     assert trace.semantic_query["filters"] == expected
     unknown = AgentRunner._run_tool("query", {**base, "filters": ["fct_transactions.nope", "x"]}, ["query"], "simple_query", trace)
     assert unknown.startswith("Error")
+
+
+def test_answers_are_always_in_the_instructions_language(monkeypatch):
+    """The answer language comes from agent_instructions.yaml (English by default), not from the question."""
+    from types import SimpleNamespace as NS
+    from app.agent import runner as runner_module
+    from app.semantic.instructions import AgentInstructions
+
+    assert AgentInstructions().language == "English"
+    assert runner_module.semantic_layer.instructions.language == "English"
+    monkeypatch.setattr(runner_module, "retrieve", lambda *a, **k: runner_module.Retrieval())
+    decision = NS(measures=[], dimensions=[], filter_values=[], time_period=None)
+    prompt, _ = runner_module.agent_runner._system_prompt(decision, "¿Cuánto gasté?")
+    assert "Always write the answer in English" in prompt
+
+
+# Router outputs taken from logged live runs, so the ranking is checked without calling Gemini
+RANKING_CASES = [
+    # (question, measure phrase, dimension phrase, filter values, acceptable top explores)
+    ("How much did I spend on public transport last month?", "total spend", "", ["public transport"],
+     {"mart_expense_summary", "fct_transactions"}),
+    ("How much did I spend on restaurants last month?", "spending", "", ["restaurants"],
+     {"mart_expense_summary", "fct_transactions"}),
+    ("What was my savings rate this year?", "savings rate", "", [], {"fct_transactions", "mart_monthly_pnl"}),
+    ("What were my top 5 merchants by spend in September 2026?", "spend", "merchants", [],
+     {"mart_expense_summary", "fct_transactions"}),
+    ("Which categories grew the most compared to the previous month?", "spend change", "category", [],
+     {"pdt_category_mom_velocity"}),
+]
+
+
+@pytest.mark.parametrize("question,measure,dimension,values,acceptable", RANKING_CASES)
+def test_explore_ranking_puts_a_fitting_explore_first(question, measure, dimension, values, acceptable):
+    from app.agent.tools.rag_tool import retrieve
+
+    r = retrieve(question, measure_phrase=measure, dimension_phrase=dimension, filter_values=values)
+    assert r.explores[0] in acceptable, r.scored()["explores"]
+
+
+def test_every_explore_is_scored_on_its_own_similarity():
+    """Each kept explore has its own similarity, not only the one closest to the question."""
+    from app.agent.tools.rag_tool import retrieve
+
+    r = retrieve("How much did I spend on public transport last month?", measure_phrase="total spend",
+                 filter_values=["public transport"])
+    assert all(e["parts"]["own"] > 0 for e in r.scored()["explores"])
+
+
+def test_a_measure_ranks_its_home_explore_above_explores_that_join_it():
+    """fct_transactions.savings_rate_pct is also reachable from transaction_labels (which joins fct_transactions);
+    with equal similarity, the explore built on fct_transactions comes first."""
+    from app.agent.tools.rag_tool import retrieve
+
+    r = retrieve("What was my savings rate this year?", measure_phrase="savings rate")
+    order = r.explores
+    assert "fct_transactions" in order
+    assert "transaction_labels" not in order or order.index("fct_transactions") < order.index("transaction_labels")

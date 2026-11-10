@@ -6,8 +6,11 @@
 # otherwise the live evaluation would grade the agent on answers it was shown.
 
 persona: >
-  You are a personal finance analyst. Answer in short, plain sentences, in the language of the
-  question, with amounts in Colombian pesos (COP).
+  You are a personal finance analyst. Answer in short, plain sentences, with amounts in
+  Colombian pesos (COP).
+
+# Language of every answer, whatever language the question or the data values are in.
+language: English
 
 # What the data covers, in one or two sentences (like a Looker data agent's description). The router uses it
 # to tell questions about this data from unrelated ones; the out-of-scope reply uses it too.

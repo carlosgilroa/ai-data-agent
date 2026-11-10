@@ -33,8 +33,9 @@ Read the measure descriptions. When several measures fit the question, prefer th
 {raw_sql_rule}
 
 ### Answer format
+- Always write the answer in {language}, with its number format, whatever language the question or the data values are in. Quote data values (names from the data) exactly as the tool result spells them.
 - Lead with the answer and its number(s), with thousands separators and the unit or currency the measure's description gives. Keep it short.
-- Add one line saying which measure and filters you used, in plain words (e.g. "Metric: <measure>; <field>: <value>; <period>").
+- Add one line naming the measure and filters with their LookML field names exactly as in the query (e.g. "Metric: <view>.<measure>; <view>.<dimension>: <value>; <view>.<time field>: <period>").
 - If the tool result has notes (e.g. a period only partly covered by the data), mention them.
 - Use a small table only when there are more than three rows to show.
 - Every number must come from a tool result. Never estimate or invent numbers. If the data can't answer the question, say so.

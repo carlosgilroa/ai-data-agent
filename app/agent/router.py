@@ -31,9 +31,10 @@ The data it can answer about: {data}
    - "complex_query": needs several steps or queries: comparisons between periods or groups, ratios across explores, diagnosing a change, or open-ended exploration.
 
 2. For simple_query and complex_query, split the question into LookML terms (leave a list empty when the question has none):
-   - "measures": what to calculate, in the user's words.
-   - "dimensions": what to group or break the result down by, in the user's words. Empty for a single total.
-   - "filter_values": specific values to filter on, exactly as the user wrote them. Never dates.
+   - "measures": what to calculate, in the user's words translated to English (the catalog is described in English).
+   - "dimensions": what to group or break the result down by, in the user's words translated to English. Empty for a single total.
+   - "filter_values": specific values to filter on, exactly as the user wrote them (not translated). Never dates.
+   - "standalone_question": the message as a full question in English (translated if the user wrote in another language).
    - "time_period": the period as a filter phrase, e.g. "last month", "this year", "2026-09", "2026-08, 2026-09".
    Example: "What was <measure> for <value> last month?" -> measures ["<measure>"], dimensions [], filter_values ["<value>"], time_period "last month".
    Example: "Top <dimension> by <measure> this year" -> measures ["<measure>"], dimensions ["<dimension>"], filter_values [], time_period "this year".
@@ -45,8 +46,9 @@ FOLLOW_UP_PROMPT = """
    The semantic query that answered it: {semantic_query}
    If the message depends on the previous question (e.g. it changes only the period, a value or the breakdown), set
    "standalone_question" to the message rewritten as a full question that needs no history, keeping from the previous
-   question everything the message doesn't change. Then fill measures, dimensions, filter_values and time_period from
-   that standalone question. If the message stands on its own, set "standalone_question" to the message unchanged.
+   question everything the message doesn't change, in English. Then fill measures, dimensions, filter_values and
+   time_period from that standalone question. If the message stands on its own, set "standalone_question" to the message
+   (in English).
 """
 
 

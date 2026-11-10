@@ -118,9 +118,19 @@ def _round(score: Optional[float]) -> Optional[float]:
     return round(score, 3) if score is not None else None
 
 
-# Weak matches still help to vote for an explore, but only fields above this floor reach the prompt
-_FIELD_POOL = 15
+# Every field above the noise floor votes for its explores (up to this many), so an explore whose fields are
+# worded differently from the others is still scored; only fields close to the best match reach the prompt.
+_FIELD_POOL = 200
 _INSTRUCTION_MIN_SIMILARITY = 0.35
+_JOINED_MEASURE_WEIGHT = 0.85
+
+
+def _defined_in_base_view(item: CatalogItem, explore_name: str) -> bool:
+    """Whether the explore is built on the view that defines this field (rather than joining it)."""
+    from app.semantic.service import semantic_layer
+
+    explore = semantic_layer.model.explores.get(explore_name)
+    return explore is None or item.view == explore.base_alias
 
 
 def retrieve(
@@ -141,22 +151,33 @@ def retrieve(
     glossary = retrieve_glossary(question, scores=glossary_scores)
     resolved = [resolve_filter_value(v, glossary) for v in (filter_values or []) if v.strip()]
     measures = vector_store.search(
-        measure_phrase or question, top_k=_FIELD_POOL, min_similarity=settings.RAG_MIN_SIMILARITY, item_types=["metric"]
+        measure_phrase or question, top_k=_FIELD_POOL, min_similarity=settings.RAG_MIN_SIMILARITY,
+        item_types=["metric"], relative_cutoff=0.0,
     )
     # Without a group-by in the question no dimension search runs: filter fields come from the value
     # resolution and time fields are listed per explore, so extra dimensions would only add tokens.
     dimensions = (
         vector_store.search(
-            dimension_phrase, top_k=_FIELD_POOL, min_similarity=settings.RAG_MIN_SIMILARITY, item_types=["dimension"]
+            dimension_phrase, top_k=_FIELD_POOL, min_similarity=settings.RAG_MIN_SIMILARITY,
+            item_types=["dimension"], relative_cutoff=0.0,
         )
         if dimension_phrase.strip()
         else []
     )
-    explore_hits = vector_store.search(question, top_k=settings.RETRIEVAL_EXPLORES + 1, min_similarity=0.0, item_types=["explore"])
+    # Every explore gets its own similarity, not only those close to the best one, so explores are compared
+    # on the same terms
+    from app.semantic.service import semantic_layer
+
+    explore_hits = vector_store.search(
+        question, top_k=max(len(semantic_layer.model.explores), 1), min_similarity=0.0, item_types=["explore"],
+        relative_cutoff=0.0,
+    )
 
     # An explore scores its own similarity plus its best measure, its best dimension (half weight) and
     # half a point for every filter value found in it. Best match, not a sum, so an explore with many
-    # look-alike measures doesn't win on volume.
+    # look-alike measures doesn't win on volume. A measure counts fully in the explore built on the view that
+    # defines it and a little less in explores that only join that view, so on a tie the measure's home
+    # explore ranks first.
     scores: Dict[str, float] = defaultdict(float)
     parts: Dict[str, Dict[str, float]] = defaultdict(
         lambda: {"own": 0.0, "best_measure": 0.0, "best_dimension": 0.0, "filter_bonus": 0.0}
@@ -168,7 +189,10 @@ def retrieve(
         best: Dict[str, float] = {}
         for item in hits:
             for explore in item.explores:
-                best[explore] = max(best.get(explore, 0.0), item.similarity_score or 0.0)
+                score = item.similarity_score or 0.0
+                if part == "best_measure" and not _defined_in_base_view(item, explore):
+                    score *= _JOINED_MEASURE_WEIGHT
+                best[explore] = max(best.get(explore, 0.0), score)
         for explore, score in best.items():
             scores[explore] += weight * score
             parts[explore][part] = weight * score
@@ -181,7 +205,10 @@ def retrieve(
         value["matches"] = [m for m in value["matches"] if set(m["explores"]) & set(explores)][:3]
 
     def within(items: List[CatalogItem], budget: int) -> List[CatalogItem]:
-        return [i for i in items if set(i.explores) & set(explores)][:budget]
+        if not items:
+            return []
+        close = (items[0].similarity_score or 0.0) * settings.RAG_RELATIVE_CUTOFF_RATIO
+        return [i for i in items if set(i.explores) & set(explores) and (i.similarity_score or 0.0) >= close][:budget]
 
     return Retrieval(
         explores=explores,

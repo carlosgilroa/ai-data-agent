@@ -68,7 +68,7 @@ def query_agent(request: QueryRequest) -> QueryResponse:
 @router.get("/session/{session_id}", tags=["AI Data Agent"])
 def get_session(session_id: str):
     """Retrieve active conversational dialogue turns for a specific session ID."""
-    history = agent_runner.sessions.get(session_id, [])
+    history = agent_runner.session_history(session_id)
     dialogue = []
     for msg in history:
         dialogue.append({
@@ -79,7 +79,12 @@ def get_session(session_id: str):
         "session_id": session_id,
         "turn_count": len(history) // 2,
         "message_count": len(history),
-        "dialogue": dialogue
+        "dialogue": dialogue,
+        # What is stored per turn: question, standalone question, semantic query (or SQL) and time
+        "turns": [
+            {k: turn[k] for k in ("question", "standalone_question", "semantic_query", "sql", "created_at")}
+            for turn in agent_runner.memory.turns(session_id)
+        ],
     }
 
 

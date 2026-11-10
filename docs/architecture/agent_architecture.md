@@ -69,7 +69,7 @@ The raw SQL tools are only bound when `ALLOW_RAW_SQL_FALLBACK=True`.
 Retrieval runs in code before the loop and costs no Gemini tokens:
 
 1. **Measures and dimensions are searched separately** in Chroma, each with its own phrase from the router, so one type never crowds out the other. No dimension search runs when the question has no group-by.
-2. **Explores are picked first, Looker-style.** Each explore scores its own similarity to the question, plus its best measure, its best dimension (half weight) and half a point for each filter value found in it. The top `RETRIEVAL_EXPLORES` (default 3) are kept, and only fields inside them are shown: up to `RETRIEVAL_MEASURES` and `RETRIEVAL_DIMENSIONS` (default 5 each).
+2. **Explores are picked first, Looker-style.** Each explore scores its own similarity to the question, plus its best measure, its best dimension (half weight) and half a point for each filter value found in it. Every explore and every field above the noise floor is scored (no relative cutoff at this step), so an explore is never left at zero just because another one matched the question better. A measure counts fully in the explore built on the view that defines it and at 0.85 in explores that only join that view (e.g. `transaction_labels` joins `fct_transactions`), so on a tie the measure's home explore ranks first. Only fields within 80% of the best match reach the prompt. The top `RETRIEVAL_EXPLORES` (default 3) are kept, and only fields inside them are shown: up to `RETRIEVAL_MEASURES` and `RETRIEVAL_DIMENSIONS` (default 5 each).
 3. **Filter values are resolved.** Each value the user mentioned is matched against the glossary first ("eating out" means category_name = "Restaurants & fast food"), and otherwise searched in every searchable text dimension (see section 4). The prompt shows the exact values found, e.g. `dim_categories.category_name = 'Restaurants & fast food'`.
 4. **Agent instructions are retrieved.** Glossary entries whose term or synonym appears in the question, plus close vector matches, and the closest golden queries (verified question and query pairs) as examples.
 
@@ -135,14 +135,15 @@ Every `QueryResponse` includes:
 - `notes`: caveats such as partly covered periods or the raw-SQL warning;
 - `governed`: `true` for LookML metrics, `false` for the raw SQL fallback;
 - `thought_steps`: the router decision, the retrieval result and every tool call with its input and output;
-- `token_usage`: the Gemini calls and their input/output tokens, in total and per call. Each entry in `token_usage.calls` also has an `input`: the `messages` the model received (role `system`, `user`, `assistant` with its `tool_calls`, or `tool` with its `tool_call_id`), the names of the `tools` it was offered, and for the router the `output_schema` it answered in. `UsageCallback.on_chat_model_start()` in `app/agent/usage.py` records it; tool schemas are left out to keep the response small. Gemini keeps no state between calls, so every call is sent its system prompt again; the response stores each distinct prompt once in `token_usage.system_prompts` (keyed `router`, `agent`, ...), and each call's system message is `{"role": "system", "ref": "agent"}`. The rest of each call's messages is listed in full, so you can see the conversation grow turn by turn.
+- `token_usage`: the Gemini calls and their input/output tokens, in total and per call (`model`, `input_tokens`, `output_tokens`, `total_tokens`). `UsageCallback` in `app/agent/usage.py` records them. The prompts sent to each call are not returned; the full answer trace is written to the log.
 
 ---
 
 ## 8. Session Memory
 
-- Keyed by `session_id`, with a 10-turn (20-message) window of clean question and answer pairs.
-- Each saved answer carries the semantic query (or SQL) it used, so follow-ups like "and the month before?" can reuse it.
+- Stored in SQLite (`SESSION_DB_PATH`, default `data/sessions.db`, git-ignored) by `SessionStore` in `app/agent/memory.py`, so follow-ups still work after a server restart. Keyed by `session_id` (the Telegram chat id once the bot is connected).
+- Each turn stores the question, the router's standalone question, the answer, and the semantic query (or raw SQL) it used. Only the last `SESSION_MAX_TURNS` (default 10) turns per session are kept, and a session with no activity for `SESSION_TTL_HOURS` (default 168, one week) is deleted on the next write.
+- The model gets the turns back as clean question and answer pairs, each answer with its semantic query, so follow-ups like "and the month before?" can reuse it. The router gets the previous standalone question and semantic query, so a chain of follow-ups stays resolvable.
 - Intermediate tool messages are dropped at the end of a turn, so Gemini never sees orphaned function calls.
 - `GET /api/v1/agent/session/{session_id}` shows a session and `DELETE` resets it.
 

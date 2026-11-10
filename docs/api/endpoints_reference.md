@@ -221,9 +221,7 @@ Example with `AGENT_TODAY=2026-10-26` (SQL and tool outputs shortened):
 | `notes` | Caveats, e.g. "2026-10-01 to 2026-10-31 is only partly covered: the data runs through 2026-10-20." |
 | `sql` | The compiled SQL (or the fallback SQL) |
 | `data` | Rows of the last query behind the answer |
-| `token_usage` | `llm_calls`, `input_tokens`, `output_tokens`, `total_tokens`, `system_prompts` and `calls`: one entry per Gemini call with `model`, its token counts and `input` |
-| `token_usage.system_prompts` | Each distinct system prompt once, keyed `router`, `agent` (`agent_2`, ... if a request used another one). Every call is sent its system prompt again; the calls point here instead of repeating it |
-| `token_usage.calls[i].input` | What that call received: `messages` (the system message as `{"role": "system", "ref": "agent"}`, pointing into `system_prompts`; the others with `role` `user`, `assistant` or `tool` and their `content`; assistant messages add `tool_calls`, tool messages add `tool_call_id`), `tools` (names of the tools offered) and, for the router, `output_schema` (`RouterDecision`) |
+| `token_usage` | `llm_calls`, `input_tokens`, `output_tokens`, `total_tokens` and `calls`: one entry per Gemini call with `model` and its token counts |
 
 #### Error Response: Missing LLM Configuration (`400 Bad Request`)
 
@@ -263,6 +261,15 @@ Retrieves active conversational dialogue turns, turn counts, and message objects
       "type": "AIMessage",
       "content": "In August 2026, your total net operational spending was $1,549,008.66...\n\n```sql\n-- Executed Lakehouse Query\nSELECT ...\n```"
     }
+  ],
+  "turns": [
+    {
+      "question": "What was my total spending in August 2026?",
+      "standalone_question": "What was my total spending in August 2026?",
+      "semantic_query": null,
+      "sql": "SELECT ...",
+      "created_at": 1794321786.05
+    }
   ]
 }
 ```
@@ -273,7 +280,7 @@ Retrieves active conversational dialogue turns, turn counts, and message objects
 
 ### `DELETE /api/v1/agent/session/{session_id}`
 
-Resets and clears the in-memory conversation history and sliding message window for a specific `session_id`.
+Deletes the stored conversation turns (SQLite) for a specific `session_id`.
 
 #### Path Parameters
 | Parameter | Type | Required | Description |

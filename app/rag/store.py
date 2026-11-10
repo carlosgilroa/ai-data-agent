@@ -121,14 +121,17 @@ class VectorStoreManager:
         top_k: Optional[int] = None,
         min_similarity: Optional[float] = None,
         item_types: Optional[List[str]] = None,
+        relative_cutoff: Optional[float] = None,
     ) -> List[CatalogItem]:
         """Search catalog for matching metrics or dimensions using dynamic relative similarity filtering.
 
         item_types limits the search to some catalog entry types (e.g. explores, metrics, dimensions).
+        relative_cutoff keeps only items within that ratio of the top score (default RAG_RELATIVE_CUTOFF_RATIO);
+        0 keeps every item above min_similarity, for callers that score all candidates themselves.
         """
         effective_top_k = top_k if top_k is not None else settings.RAG_TOP_K
         noise_floor = settings.RAG_MIN_SIMILARITY if min_similarity is None else min_similarity
-        rel_ratio = settings.RAG_RELATIVE_CUTOFF_RATIO
+        rel_ratio = settings.RAG_RELATIVE_CUTOFF_RATIO if relative_cutoff is None else relative_cutoff
 
         if self.chroma_available and self.collection is not None:
             try:
