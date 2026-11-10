@@ -16,9 +16,9 @@ docs/
 │   └── semantic_rag_indexer.md        # LookML AST parser, views/models/joins & ChromaDB RAG
 ├── evaluation/                        # BI ground-truth verification & semantic alignment
 │   └── looker_dashboard_reconciliation.md # [Active] Real-world reconciliation against production Looker Dashboard
-└── deployment/                        # Local and production deployment guides (Upcoming)
+└── deployment/                        # Local and production deployment guides
     ├── local_development.md           # [Planned] Local venv, Windows execution, environment
-    └── docker_compose.md              # [Planned] Containerization & Raspberry Pi integration
+    └── raspberry_pi.md                # [Active] Docker on the Pi next to the wallet, deploy script, data reload, cost limits
 ```
 
 ---

@@ -5,7 +5,7 @@
 #
 # On the Pi it clones wallet-lookml and ai-data-agent into ~/projects if they are missing, pulls main
 # in both (fast-forward only, so local changes on the Pi stop the deploy instead of being overwritten),
-# rebuilds the image only when requirements.txt or the Dockerfile changed, restarts the agent and
+# rebuilds the image only when requirements.txt, constraints.txt or the Dockerfile changed, restarts the agent and
 # waits for its health check. The wallet repo is not touched: it has its own deploy.
 # The agent's .env must already exist on the Pi (see docs/deployment/raspberry_pi.md).
 set -euo pipefail
@@ -43,7 +43,7 @@ fi
 chmod 600 .env
 mkdir -p data logs
 
-if ! docker image inspect ai-data-agent >/dev/null 2>&1 || ! git diff --quiet "$before" HEAD -- requirements.txt Dockerfile; then
+if ! docker image inspect ai-data-agent >/dev/null 2>&1 || ! git diff --quiet "$before" HEAD -- requirements.txt constraints.txt Dockerfile; then
   echo "== Building the image (first time on a Pi takes several minutes)"
   docker compose build
 fi
