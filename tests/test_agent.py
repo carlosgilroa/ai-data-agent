@@ -418,12 +418,10 @@ def test_token_usage_is_tracked_per_request():
     assert [c["model"] for c in usage["calls"]] == ["router", "main"]
 
 
-def test_token_usage_records_each_calls_input():
-    """Each call in token_usage carries the messages it received and the names of the tools offered."""
-    import uuid
+def test_token_usage_has_counts_but_no_prompts():
+    """token_usage reports models and token counts only; the prompts sent to each call are not returned."""
     from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-    from langchain_core.outputs import ChatGeneration, LLMResult
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
     from app.agent.usage import UsageCallback, start_tracking, summarize
 
     usage_metadata = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
@@ -433,45 +431,10 @@ def test_token_usage_records_each_calls_input():
     )
     model.invoke([SystemMessage(content="You are an analyst."), HumanMessage(content="How much?")])
 
-    # A later turn of the tool loop, with the tools offered the way the Gemini integration passes them
-    callback, run_id = UsageCallback("main"), uuid.uuid4()
-    turn = [
-        HumanMessage(content="How much?"),
-        AIMessage(content="", tool_calls=[{"name": "query", "args": {"explore": "e"}, "id": "c1"}]),
-        ToolMessage(content='{"rows": []}', tool_call_id="c1", name="query"),
-    ]
-    callback.on_chat_model_start(
-        {}, [turn], run_id=run_id,
-        invocation_params={"tools": [{"function_declarations": [{"name": "query"}, {"name": "get_explores"}]}]},
-    )
-    callback.on_llm_end(
-        LLMResult(generations=[[ChatGeneration(message=AIMessage(content="done", usage_metadata=usage_metadata))]]),
-        run_id=run_id,
-    )
-
-    first, second = summarize(calls)["calls"]
-    assert first["input"]["messages"] == [
-        {"role": "system", "ref": "agent"},
-        {"role": "user", "content": "How much?"},
-    ]
-    assert first["input"]["tools"] == []
-    assert second["input"]["tools"] == ["query", "get_explores"]
-    assistant, tool_msg = second["input"]["messages"][1:]
-    assert assistant["tool_calls"] == [{"name": "query", "args": {"explore": "e"}}]
-    assert tool_msg == {"role": "tool", "content": '{"rows": []}', "tool_call_id": "c1", "name": "query"}
-    assert not callback._inputs  # nothing left behind once the call ended
-
-    # The router answers in a JSON schema instead of calling tools; its name is recorded
-    router, run_id = UsageCallback("router"), uuid.uuid4()
-    router.on_chat_model_start(
-        {}, [[HumanMessage(content="How much?")]], run_id=run_id,
-        invocation_params={"response_json_schema": {"title": "RouterDecision", "type": "object"}},
-    )
-    router.on_llm_end(
-        LLMResult(generations=[[ChatGeneration(message=AIMessage(content="{}", usage_metadata=usage_metadata))]]),
-        run_id=run_id,
-    )
-    assert calls[-1]["input"]["output_schema"] == "RouterDecision"
+    usage = summarize(calls)
+    assert set(usage) == {"llm_calls", "input_tokens", "output_tokens", "total_tokens", "calls"}
+    assert usage["calls"] == [{"model": "fake", "input_tokens": 10, "output_tokens": 2, "total_tokens": 12}]
+    assert "You are an analyst." not in str(usage)
 
 
 def test_prompts_name_no_dataset():
@@ -520,7 +483,6 @@ def test_tool_descriptions_are_sent_once():
     from langchain_google_genai import ChatGoogleGenerativeAI
     from langchain_google_genai._function_utils import convert_to_genai_function_declarations
     from app.agent.runner import tool_declarations
-    from app.agent.usage import _tool_names
 
     llm = ChatGoogleGenerativeAI(model="gemini-3.5-flash-lite", google_api_key="test-key")
     bound = llm.bind_tools(tool_declarations(list(TOOL_REGISTRY)))
@@ -530,7 +492,6 @@ def test_tool_descriptions_are_sent_once():
     declarations = [d for tool in sent for d in tool.function_declarations]
 
     assert [d.name for d in declarations] == list(TOOL_REGISTRY)
-    assert _tool_names(params) == list(TOOL_REGISTRY)
     for d in declarations:
         assert d.description
         assert not (d.parameters and d.parameters.description), f"{d.name} repeats its description on its parameters"
@@ -564,31 +525,6 @@ def test_retrieval_trace_carries_similarity_scores():
 
     prompt = _format_retrieval(r, SimpleNamespace(time_period="last month"))
     assert "score" not in prompt.lower()
-
-
-def test_token_usage_stores_each_system_prompt_once():
-    """Calls that repeat a system prompt point to one stored copy; a different prompt gets its own key."""
-    from app.agent.usage import summarize
-
-    def call(system, output_schema=None, extra=()):
-        call_input = {"messages": [{"role": "system", "content": system}, {"role": "user", "content": "Q"}, *extra], "tools": []}
-        if output_schema:
-            call_input["output_schema"] = output_schema
-        return {"model": "m", "input_tokens": 1, "output_tokens": 1, "total_tokens": 2, "input": call_input}
-
-    tool_turn = ({"role": "assistant", "content": "", "tool_calls": [{"name": "query", "args": {}}]},)
-    usage = summarize([
-        call("Route it.", output_schema="RouterDecision"),
-        call("Answer it."),
-        call("Answer it.", extra=tool_turn),
-        call("Decline politely."),
-    ])
-    assert usage["system_prompts"] == {"router": "Route it.", "agent": "Answer it.", "agent_2": "Decline politely."}
-    refs = [c["input"]["messages"][0] for c in usage["calls"]]
-    assert refs == [{"role": "system", "ref": r} for r in ["router", "agent", "agent", "agent_2"]]
-    assert usage["calls"][2]["input"]["messages"][2]["tool_calls"][0]["name"] == "query"  # the loop's growth stays visible
-    assert usage["calls"][0]["input"]["output_schema"] == "RouterDecision"
-    assert summarize([])["calls"] == [] and "system_prompts" not in summarize([])
 
 
 def test_field_values_flag_a_cut_off_list():
@@ -925,3 +861,17 @@ def test_flat_alternating_filter_list_is_read_only_when_unambiguous():
     assert trace.semantic_query["filters"] == expected
     unknown = AgentRunner._run_tool("query", {**base, "filters": ["fct_transactions.nope", "x"]}, ["query"], "simple_query", trace)
     assert unknown.startswith("Error")
+
+
+def test_answers_are_always_in_the_instructions_language(monkeypatch):
+    """The answer language comes from agent_instructions.yaml (English by default), not from the question."""
+    from types import SimpleNamespace as NS
+    from app.agent import runner as runner_module
+    from app.semantic.instructions import AgentInstructions
+
+    assert AgentInstructions().language == "English"
+    assert runner_module.semantic_layer.instructions.language == "English"
+    monkeypatch.setattr(runner_module, "retrieve", lambda *a, **k: runner_module.Retrieval())
+    decision = NS(measures=[], dimensions=[], filter_values=[], time_period=None)
+    prompt, _ = runner_module.agent_runner._system_prompt(decision, "¿Cuánto gasté?")
+    assert "Always write the answer in English" in prompt

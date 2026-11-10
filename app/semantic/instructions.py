@@ -49,6 +49,8 @@ class GoldenQuery(BaseModel):
 
 class AgentInstructions(BaseModel):
     persona: str = ""
+    # Language every answer is written in, whatever language the question or the data values are in
+    language: str = "English"
     # One or two sentences on what the data covers; the router uses it to tell in-scope questions from others
     data_description: str = ""
     glossary: List[GlossaryEntry] = Field(default_factory=list)

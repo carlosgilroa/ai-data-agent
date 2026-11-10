@@ -464,6 +464,7 @@ class AgentRunner:
         instructions = semantic_layer.instructions
         prompt = AGENT_SYSTEM_PROMPT.format(
             persona=instructions.persona.strip() or DEFAULT_PERSONA,
+            language=instructions.language.strip() or "English",
             raw_sql_rule=RAW_SQL_ENABLED if settings.ALLOW_RAW_SQL_FALLBACK else RAW_SQL_DISABLED,
         )
         first, last = duckdb_tool.get_data_coverage()
@@ -563,7 +564,8 @@ class AgentRunner:
                     content=(
                         f"{semantic_layer.instructions.persona.strip() or DEFAULT_PERSONA}\n\n"
                         "The user's question is outside the data you can answer about. Politely decline, and "
-                        f"say briefly what kinds of questions you can answer. The data you cover: {data_description()}"
+                        f"say briefly what kinds of questions you can answer. The data you cover: {data_description()}\n"
+                        f"Write the reply in {semantic_layer.instructions.language.strip() or 'English'}."
                     )
                 ),
                 HumanMessage(content=request.query),

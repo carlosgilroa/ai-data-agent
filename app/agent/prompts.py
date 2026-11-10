@@ -33,6 +33,7 @@ Read the measure descriptions. When several measures fit the question, prefer th
 {raw_sql_rule}
 
 ### Answer format
+- Always write the answer in {language}, whatever language the question or the data values are in. Quote data values (names from the data) exactly as the tool result spells them.
 - Lead with the answer and its number(s), with thousands separators and the unit or currency the measure's description gives. Keep it short.
 - Add one line saying which measure and filters you used, in plain words (e.g. "Metric: <measure>; <field>: <value>; <period>").
 - If the tool result has notes (e.g. a period only partly covered by the data), mention them.
