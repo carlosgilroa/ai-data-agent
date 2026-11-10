@@ -47,8 +47,9 @@ if ! docker image inspect ai-data-agent >/dev/null 2>&1 || ! git diff --quiet "$
   echo "== Building the image (first time on a Pi takes several minutes)"
   docker compose build
 fi
-docker compose up -d
-docker compose restart ai-data-agent
+# Recreate rather than restart: one start per deploy, and the container re-reads .env
+# (a plain restart keeps the environment it was created with)
+docker compose up -d --force-recreate
 
 echo "== Waiting for the health check (the first start builds the Chroma catalog)"
 for _ in $(seq 1 60); do
