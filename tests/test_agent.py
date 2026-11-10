@@ -916,3 +916,53 @@ def test_a_measure_ranks_its_home_explore_above_explores_that_join_it():
     order = r.explores
     assert "fct_transactions" in order
     assert "transaction_labels" not in order or order.index("fct_transactions") < order.index("transaction_labels")
+
+
+class _GreedyLLM:
+    """Keeps asking for queries, spending 30k input tokens per call, until told to answer."""
+
+    def __init__(self, query_args):
+        self.query_args = query_args
+        self.tool_rounds = 0
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage, HumanMessage
+        from app.agent.usage import _current
+
+        _current.get().append({"model": "fake", "input_tokens": 30000, "output_tokens": 10, "total_tokens": 30010})
+        if isinstance(messages[-1], HumanMessage) and "synthesize your final answer" in messages[-1].content:
+            return AIMessage(content="Partial answer.")
+        self.tool_rounds += 1
+        return AIMessage(
+            content="",
+            tool_calls=[{"name": "query", "args": self.query_args, "id": f"call-{self.tool_rounds}"}],
+        )
+
+
+def test_token_ceiling_stops_the_tool_loop(monkeypatch):
+    """Once a question has used MAX_INPUT_TOKENS_PER_QUESTION input tokens, the agent stops calling tools and answers."""
+    from app.agent.router import intent_router
+    from app.core.config import settings
+    from app.schemas.query import RouterDecision
+
+    fake = _GreedyLLM({"explore": "fct_transactions", "fields": ["fct_transactions.total_spend_cop"]})
+    monkeypatch.setattr(settings, "MAX_INPUT_TOKENS_PER_QUESTION", 40000)
+    monkeypatch.setattr(agent_runner, "api_key", "test-key")
+    monkeypatch.setattr(agent_runner, "llm_with_tools", fake)
+    monkeypatch.setattr(agent_runner, "_get_or_create_llm", lambda model, tools: (fake, fake))
+    monkeypatch.setattr(
+        intent_router,
+        "classify",
+        lambda query, has_session_context=False, previous=None: RouterDecision(
+            intent="complex_query", reasoning="test", measures=["total spend"]
+        ),
+    )
+
+    res = agent_runner.run_query(QueryRequest(query="Which categories grew the most?"))
+
+    assert fake.tool_rounds == 2  # 30k after the first call, 60k after the second: stop
+    assert res.answer == "Partial answer."
+    assert res.token_usage["input_tokens"] == 90000

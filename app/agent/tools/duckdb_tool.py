@@ -1,8 +1,10 @@
 import time
 import logging
+import threading
 import math
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import duckdb
 from app.core.config import settings
@@ -19,18 +21,12 @@ class DuckDBTool:
     """Safe, read-only SQL execution engine over local Parquet Lakehouse files."""
 
     def __init__(self):
-        self.conn = duckdb.connect(":memory:")
-        self._register_views()
-        self._lock_down()
+        self._reload_lock = threading.Lock()
+        self._signature = self._data_signature()
+        self.conn = self._build_connection(strict=False)
 
-    def _register_views(self):
-        """Load the parquet data files into in-memory tables and register LookML derived tables as views.
-
-        The data is loaded into memory (not left as read_parquet views) so that file access
-        can be switched off afterwards; restart the app to pick up new data.
-        """
-        import re
-
+    def _data_files(self) -> List[Tuple[str, Path]]:
+        """Every parquet table the agent loads: the core silver/gold tables plus any other the LookML references."""
         from app.semantic.model import referenced_tables
 
         tables = [
@@ -52,15 +48,84 @@ class DuckDBTool:
                     tables.append((name, settings.WALLET_DATA_DIR / layer / f"{name}.parquet"))
         except Exception as e:
             logger.warning("Could not read table names from LookML: %s", e)
+        return tables
+
+    def _data_signature(self) -> Dict[str, Tuple[int, int]]:
+        """Modification time and size of each parquet file that exists."""
+        signature = {}
+        for _, path in self._data_files():
+            try:
+                stat = path.stat()
+                signature[str(path)] = (stat.st_mtime_ns, stat.st_size)
+            except OSError:
+                continue
+        return signature
+
+    def _build_connection(self, strict: bool) -> duckdb.DuckDBPyConnection:
+        """A new in-memory database with the data loaded and file access switched off.
+
+        With strict=True any table that fails to load raises, so a reload never replaces good data
+        with a partial copy.
+        """
+        conn = duckdb.connect(":memory:")
+        try:
+            self._register_views(conn, strict)
+            self._lock_down(conn)
+        except Exception:
+            conn.close()
+            raise
+        return conn
+
+    def refresh_if_changed(self, stable_seconds: Optional[float] = None) -> bool:
+        """Reload the data when a parquet file changed and has been untouched for stable_seconds.
+
+        The wallet pipeline rewrites the files in place, so a file that changed moments ago may still
+        be half written; it is picked up on a later call. If the reload fails, the current data stays
+        and the reload is retried on the next call. Returns True when new data was swapped in.
+        """
+        stable = settings.DATA_RELOAD_STABLE_SECONDS if stable_seconds is None else stable_seconds
+        signature = self._data_signature()
+        if signature == self._signature:
+            return False
+        newest = max((mtime for mtime, _ in signature.values()), default=0) / 1e9
+        if time.time() - newest < stable:
+            return False
+        if not self._reload_lock.acquire(blocking=False):
+            return False  # another request is already reloading
+        try:
+            if signature == self._signature:
+                return False
+            try:
+                conn = self._build_connection(strict=True)
+            except Exception as e:
+                logger.warning("Parquet files changed but could not be reloaded; keeping the loaded data: %s", e)
+                return False
+            # Requests already running keep the old connection until they finish; new ones use this one
+            self.conn = conn
+            self._signature = signature
+            logger.info("Parquet files changed on disk; data reloaded.")
+            return True
+        finally:
+            self._reload_lock.release()
+
+    def _register_views(self, conn: duckdb.DuckDBPyConnection, strict: bool = False):
+        """Load the parquet data files into in-memory tables and register LookML derived tables as views.
+
+        The data is loaded into memory (not left as read_parquet views) so that file access
+        can be switched off afterwards; refresh_if_changed picks up new data.
+        """
+        import re
 
         registered = []
-        for name, path in tables:
+        for name, path in self._data_files():
             if path.exists():
                 try:
                     posix_path = path.as_posix()
-                    self.conn.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM read_parquet('{posix_path}')")
+                    conn.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM read_parquet('{posix_path}')")
                     registered.append(name)
                 except Exception as e:
+                    if strict:
+                        raise
                     logger.error("Failed to register view %s for %s: %s", name, path, e)
             else:
                 logger.warning("Parquet path %s does not exist; view %s skipped.", path, name)
@@ -81,21 +146,24 @@ class DuckDBTool:
                             compiled_sql = re.sub(
                                 r"`?@\{schema_name\}\.([a-zA-Z0-9_]+)`?", r"\1", raw_dt_sql
                             ).strip().rstrip(";")
-                            self.conn.execute(f"CREATE OR REPLACE VIEW {v_name} AS {compiled_sql}")
+                            conn.execute(f"CREATE OR REPLACE VIEW {v_name} AS {compiled_sql}")
                             registered.append(v_name)
         except Exception as e:
+            if strict:
+                raise
             logger.warning("Could not register LookML derived table views in DuckDB: %s", e)
 
         logger.info("DuckDB initialized with views: %s", registered)
 
-    def _lock_down(self):
+    @staticmethod
+    def _lock_down(conn: duckdb.DuckDBPyConnection):
         """Disable file system, network and extension access, then freeze the configuration.
 
         Without this, a read-only SELECT could still read any file on the machine
         (e.g. read_text('.env')), because DuckDB table functions access the file system.
         """
-        self.conn.execute("SET enable_external_access = false")
-        self.conn.execute("SET lock_configuration = true")
+        conn.execute("SET enable_external_access = false")
+        conn.execute("SET lock_configuration = true")
 
     def validate_sql(self, sql: str) -> None:
         """Ensure the SQL query is strictly read-only and safe."""

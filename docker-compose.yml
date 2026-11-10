@@ -1,0 +1,52 @@
+# Runs the agent on the Raspberry Pi next to the wallet containers.
+# Expects the three repos side by side in ~/projects: wallet, wallet-lookml, ai-data-agent.
+services:
+  ai-data-agent:
+    build: .
+    image: ai-data-agent
+    container_name: ai-data-agent
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - WALLET_DATA_DIR=/data/wallet
+      - LOOKML_DIR=/data/lookml
+      - DEBUG=false
+      - TZ=America/Bogota
+    volumes:
+      # Read-only: the agent can never change the wallet lake or the LookML
+      - ../wallet/data:/data/wallet:ro
+      - ../wallet-lookml:/data/lookml:ro
+      # Code is mounted like in the wallet, so a git pull plus a restart deploys it
+      - ./app:/app/app:ro
+      - ./agent_instructions.yaml:/app/agent_instructions.yaml:ro
+      # The agent's own state: Chroma catalog and SQLite sessions, plus answer traces
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Embedding model download (about 80 MB), kept across rebuilds
+      - model-cache:/home/agent/.cache
+    # Only reachable from the Pi itself (curl or an SSH tunnel) and from the wallet bot over
+    # the wallet_default network; the API has no authentication, so never publish it to the LAN
+    ports:
+      - "127.0.0.1:8000:8000"
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      start_period: 300s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - wallet
+
+networks:
+  wallet:
+    external: true
+    name: wallet_default
+
+volumes:
+  model-cache:

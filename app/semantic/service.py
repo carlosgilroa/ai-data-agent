@@ -118,6 +118,10 @@ class SemanticLayer:
                     logger.error("Reload callback failed: %s", e)
         return reloaded
 
+    def clear_data_caches(self) -> None:
+        """Forget results computed from the data (row counts), after the parquet files were reloaded."""
+        self._cardinalities.clear()
+
     # ------------------------------------------------------------------ queries
 
     def compile(self, query: SemanticQuery) -> CompiledQuery:

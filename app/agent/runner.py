@@ -520,6 +520,8 @@ class AgentRunner:
             )
 
         semantic_layer.ensure_fresh()
+        if duckdb_tool.refresh_if_changed():
+            semantic_layer.clear_data_caches()
 
         thought_steps: List[AgentThoughtStep] = []
         trace = _AnswerTrace()
@@ -622,7 +624,13 @@ class AgentRunner:
         # -----------------------------------------------------------------
         # Step 2B: Tool-calling loop
         # -----------------------------------------------------------------
+        stop_reason = f"I couldn't finish the analysis within {max_iterations} steps."
         for _ in range(max_iterations):
+            spent = sum(c["input_tokens"] for c in trace.llm_calls)
+            if settings.MAX_INPUT_TOKENS_PER_QUESTION and spent >= settings.MAX_INPUT_TOKENS_PER_QUESTION:
+                logger.info("Token ceiling reached (%d input tokens); answering with what was retrieved.", spent)
+                stop_reason = "I stopped the analysis because it was using too many tokens."
+                break
             ai_msg = routed_llm_with_tools.invoke(messages)
             messages.append(ai_msg)
 
@@ -654,7 +662,7 @@ class AgentRunner:
                 step_counter += 1
                 messages.append(ToolMessage(content=str(tool_output), tool_call_id=tc.get("id")))
 
-        # Step budget exhausted: force a final answer from what was retrieved
+        # Step budget or token ceiling reached: force a final answer from what was retrieved
         try:
             messages.append(
                 HumanMessage(
@@ -676,10 +684,7 @@ class AgentRunner:
             final_answer = ""
 
         if not final_answer:
-            final_answer = (
-                f"I couldn't finish the analysis within {max_iterations} steps. "
-                "Please try asking a narrower question."
-            )
+            final_answer = f"{stop_reason} Please try asking a narrower question."
 
         self._save_session_turn(session_id, request.query, final_answer, trace.sql, trace.semantic_query, question)
         return self._response(request, decision.intent, target_model, final_answer, trace, thought_steps, start_time)
