@@ -141,8 +141,9 @@ Every `QueryResponse` includes:
 
 ## 8. Session Memory
 
-- Keyed by `session_id`, with a 10-turn (20-message) window of clean question and answer pairs.
-- Each saved answer carries the semantic query (or SQL) it used, so follow-ups like "and the month before?" can reuse it.
+- Stored in SQLite (`SESSION_DB_PATH`, default `data/sessions.db`, git-ignored) by `SessionStore` in `app/agent/memory.py`, so follow-ups still work after a server restart. Keyed by `session_id` (the Telegram chat id once the bot is connected).
+- Each turn stores the question, the router's standalone question, the answer, and the semantic query (or raw SQL) it used. Only the last `SESSION_MAX_TURNS` (default 10) turns per session are kept, and a session with no activity for `SESSION_TTL_HOURS` (default 168, one week) is deleted on the next write.
+- The model gets the turns back as clean question and answer pairs, each answer with its semantic query, so follow-ups like "and the month before?" can reuse it. The router gets the previous standalone question and semantic query, so a chain of follow-ups stays resolvable.
 - Intermediate tool messages are dropped at the end of a turn, so Gemini never sees orphaned function calls.
 - `GET /api/v1/agent/session/{session_id}` shows a session and `DELETE` resets it.
 

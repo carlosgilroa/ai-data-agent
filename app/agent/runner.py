@@ -3,6 +3,7 @@ import re
 import time
 import logging
 import json
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.tools import tool
@@ -20,6 +21,7 @@ from app.agent.tools.rag_tool import (
 from app.agent.prompts import AGENT_SYSTEM_PROMPT, DEFAULT_PERSONA, RAW_SQL_DISABLED, RAW_SQL_ENABLED
 from app.agent.router import data_description, intent_router
 from app.agent.usage import UsageCallback, start_tracking, summarize
+from app.agent.memory import SessionStore
 from app.semantic.compiler import SemanticQuery, SemanticQueryError
 from app.semantic.service import semantic_layer
 
@@ -350,6 +352,12 @@ class _AnswerTrace:
         self.governed = False
 
 
+def _project_path(path: str) -> Path:
+    """A relative path from the settings, resolved against the project root."""
+    p = Path(path)
+    return p if p.is_absolute() else Path(__file__).resolve().parents[2] / p
+
+
 class AgentRunner:
     """Tool-calling agent: intent routing, catalog retrieval, LookML semantic queries compiled to SQL,
     conversational session memory and a read-only raw SQL fallback.
@@ -361,9 +369,10 @@ class AgentRunner:
         self.llm = None
         self.llm_with_tools = None
         self.init_error = None
-        self.sessions: Dict[str, List[Any]] = {}
-        # Each session's last question and its semantic query, for the router to resolve follow-ups
-        self.last_turns: Dict[str, Dict[str, Any]] = {}
+        # Conversation memory in SQLite, so follow-ups still work after a restart
+        self.memory = SessionStore(
+            _project_path(settings.SESSION_DB_PATH), settings.SESSION_MAX_TURNS, settings.SESSION_TTL_HOURS
+        )
         self._model_cache: Dict[str, Any] = {}
         self._init_llm()
 
@@ -427,34 +436,38 @@ class AgentRunner:
         assistant_answer: str,
         last_sql: Optional[str] = None,
         last_semantic_query: Optional[Dict[str, Any]] = None,
+        standalone_question: Optional[str] = None,
     ) -> None:
-        """Persist clean conversational dialogue turns (HumanMessage, AIMessage) to session memory.
-
-        Includes the semantic query (or the raw SQL) in the assistant turn for continuity,
-        without preserving raw intermediate ToolMessages that cause Gemini turn-validation
-        errors (400 INVALID_ARGUMENT).
-        """
+        """Store the turn in session memory: question, standalone question, answer and the query behind it."""
         if not session_id:
             return
+        self.memory.add_turn(
+            session_id,
+            question=user_query,
+            answer=assistant_answer,
+            standalone_question=standalone_question,
+            semantic_query=last_semantic_query,
+            sql=last_sql,
+        )
 
-        assistant_content = assistant_answer
-        if last_semantic_query:
-            # Lets a follow-up ("and in August?") reuse the previous query and change one part
-            assistant_content += f"\n\nSemantic query used: {json.dumps(_tool_args(last_semantic_query))}"
-        elif last_sql and "```sql" not in assistant_content:
-            assistant_content += f"\n\n```sql\n-- Executed Lakehouse Query\n{last_sql}\n```"
+    def session_history(self, session_id: Optional[str]) -> List[Any]:
+        """The stored turns as clean (HumanMessage, AIMessage) pairs for the model.
 
-        history = self.sessions.get(session_id, [])
-        history.append(HumanMessage(content=user_query))
-        history.append(AIMessage(content=assistant_content))
-
-        # Sliding window: keep the last 10 conversation turns (20 messages)
-        max_dialogue_messages = 20
-        if len(history) > max_dialogue_messages:
-            history = history[-max_dialogue_messages:]
-
-        self.sessions[session_id] = history
-        self.last_turns[session_id] = {"question": user_query, "semantic_query": last_semantic_query}
+        The assistant turn carries the semantic query (or the raw SQL) for continuity, without the
+        intermediate ToolMessages that cause Gemini turn-validation errors (400 INVALID_ARGUMENT).
+        """
+        if not session_id:
+            return []
+        history: List[Any] = []
+        for turn in self.memory.turns(session_id):
+            content = turn["answer"]
+            if turn["semantic_query"]:
+                # Lets a follow-up ("and in August?") reuse the previous query and change one part
+                content += f"\n\nSemantic query used: {json.dumps(_tool_args(turn['semantic_query']))}"
+            elif turn["sql"] and "```sql" not in content:
+                content += f"\n\n```sql\n-- Executed Lakehouse Query\n{turn['sql']}\n```"
+            history += [HumanMessage(content=turn["question"]), AIMessage(content=content)]
+        return history
 
     def _system_prompt(
         self, decision, question: str, previous_query: Optional[Dict[str, Any]] = None
@@ -513,12 +526,18 @@ class AgentRunner:
         trace.llm_calls = start_tracking()
 
         session_id = request.session_id.strip() if (request.session_id and request.session_id.strip()) else None
-        has_session_context = bool(session_id and session_id in self.sessions)
+        previous = self.memory.last_turn(session_id) if session_id else None
+        has_session_context = previous is not None
 
         # -----------------------------------------------------------------
         # Step 1: Intent routing
         # -----------------------------------------------------------------
-        previous = self.last_turns.get(session_id) if has_session_context else None
+        if previous:
+            # The previous standalone question carries its own context, so a chain of follow-ups stays resolvable
+            previous = {
+                "question": previous.get("standalone_question") or previous["question"],
+                "semantic_query": previous.get("semantic_query"),
+            }
         decision = intent_router.classify(request.query, has_session_context=has_session_context, previous=previous)
         # Retrieval searches the follow-up rewritten as a full question, so it finds what the history implies
         question = (decision.standalone_question or "").strip() or request.query
@@ -572,7 +591,7 @@ class AgentRunner:
             ]
             ai_msg = base_llm.invoke(oos_messages)
             answer = self._extract_text(ai_msg.content)
-            self._save_session_turn(session_id, request.query, answer)
+            self._save_session_turn(session_id, request.query, answer, standalone_question=question)
             return self._response(request, decision.intent, target_model, answer, trace, thought_steps, start_time)
 
         previous_query = previous.get("semantic_query") if previous else None
@@ -597,8 +616,7 @@ class AgentRunner:
         )
         step_counter += 1
         messages: List[Any] = [SystemMessage(content=system_prompt)]
-        if session_id and session_id in self.sessions:
-            messages.extend(self.sessions[session_id])
+        messages.extend(self.session_history(session_id))
         messages.append(HumanMessage(content=request.query))
 
         # -----------------------------------------------------------------
@@ -610,7 +628,7 @@ class AgentRunner:
 
             if not ai_msg.tool_calls:
                 answer = self._extract_text(ai_msg.content)
-                self._save_session_turn(session_id, request.query, answer, trace.sql, trace.semantic_query)
+                self._save_session_turn(session_id, request.query, answer, trace.sql, trace.semantic_query, question)
                 return self._response(request, decision.intent, target_model, answer, trace, thought_steps, start_time)
 
             for tc in ai_msg.tool_calls:
@@ -663,7 +681,7 @@ class AgentRunner:
                 "Please try asking a narrower question."
             )
 
-        self._save_session_turn(session_id, request.query, final_answer, trace.sql, trace.semantic_query)
+        self._save_session_turn(session_id, request.query, final_answer, trace.sql, trace.semantic_query, question)
         return self._response(request, decision.intent, target_model, final_answer, trace, thought_steps, start_time)
 
     @staticmethod
@@ -716,11 +734,7 @@ class AgentRunner:
 
     def clear_session(self, session_id: str) -> bool:
         """Clear conversation history for a given session ID."""
-        self.last_turns.pop(session_id, None)
-        if session_id in self.sessions:
-            del self.sessions[session_id]
-            return True
-        return False
+        return self.memory.clear(session_id)
 
 
 agent_runner = AgentRunner()

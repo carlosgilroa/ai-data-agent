@@ -80,7 +80,7 @@ flowchart TD
 6. **Traceable answers**: every response carries the semantic query, the LookML fields with their definitions, the compiled SQL, the rows, coverage notes, whether the numbers are governed, the retrieval result and the Gemini tokens spent.
 7. **Locked-down DuckDB**: tables are loaded into memory at start, then external file access and configuration changes are disabled, so agent SQL can't read other files on the machine. Only `SELECT` and `WITH` statements run.
 8. **Golden questions**: 31 questions with hand-written reference SQL. The compiler is checked against them for free on every test run; the full agent is checked through Gemini only on demand.
-9. **Session memory**: 10-turn window per `session_id`, including the last semantic query for follow-ups.
+9. **Session memory**: the last 10 turns per `session_id` in SQLite (survives restarts, expires after a week idle), including the standalone question and semantic query for follow-ups.
 
 ---
 

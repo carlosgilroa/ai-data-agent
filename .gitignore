@@ -39,6 +39,9 @@ data/chroma/
 # Agent query traces (contain financial data)
 logs/
 
+# Conversation memory (contains questions and answers about finances)
+data/sessions.db*
+
 # Testing & Coverage
 .pytest_cache/
 .coverage

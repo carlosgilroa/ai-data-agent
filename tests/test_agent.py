@@ -121,11 +121,9 @@ def test_session_clear_endpoint():
 
     test_session = "test-session-suite-1"
     # Seed session
-    agent_runner.sessions[test_session] = [
-        HumanMessage(content="What were my expenses in January 2026?"),
-        AIMessage(content="Your total expenses were $2,500,000 COP.")
-    ]
-    assert test_session in agent_runner.sessions
+    agent_runner._save_session_turn(test_session, "What were my expenses in January 2026?",
+                                    "Your total expenses were $2,500,000 COP.")
+    assert agent_runner.memory.has(test_session)
 
     # Call delete endpoint
     response = client.delete(f"/api/v1/agent/session/{test_session}")
@@ -133,7 +131,7 @@ def test_session_clear_endpoint():
     data = response.json()
     assert data["session_id"] == test_session
     assert data["cleared"] is True
-    assert test_session not in agent_runner.sessions
+    assert not agent_runner.memory.has(test_session)
 
     # Call delete endpoint again on non-existent session
     response2 = client.delete(f"/api/v1/agent/session/{test_session}")
@@ -261,7 +259,7 @@ def test_session_memory_turn_validation_safety():
         last_sql="SELECT year_month, net_spent FROM mart_expense_summary",
     )
 
-    history = agent_runner.sessions[test_session]
+    history = agent_runner.session_history(test_session)
     assert len(history) == 4
     # Ensure all messages are alternating HumanMessage and AIMessage, and no ToolMessage exists
     assert isinstance(history[0], HumanMessage)
@@ -321,7 +319,7 @@ def test_session_memory_keeps_semantic_query_for_follow_ups():
         last_sql="SELECT ...",
         last_semantic_query={"explore": "mart_monthly_pnl", "fields": ["mart_monthly_pnl.total_spend_cop"]},
     )
-    content = agent_runner.sessions[test_session][1].content
+    content = agent_runner.session_history(test_session)[1].content
     assert "Semantic query used:" in content
     assert "mart_monthly_pnl.total_spend_cop" in content
     agent_runner.clear_session(test_session)
@@ -775,7 +773,7 @@ def test_follow_up_retrieves_the_standalone_question_and_keeps_previous_filters(
     assert "- dim_categories.category_name = 'Groceries'" in follow_up_context
 
     agent_runner.clear_session(session)
-    assert session not in agent_runner.last_turns
+    assert not agent_runner.memory.has(session)
 
 
 def test_filters_sent_as_text_are_read_only_as_literals():

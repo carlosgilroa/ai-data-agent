@@ -261,6 +261,15 @@ Retrieves active conversational dialogue turns, turn counts, and message objects
       "type": "AIMessage",
       "content": "In August 2026, your total net operational spending was $1,549,008.66...\n\n```sql\n-- Executed Lakehouse Query\nSELECT ...\n```"
     }
+  ],
+  "turns": [
+    {
+      "question": "What was my total spending in August 2026?",
+      "standalone_question": "What was my total spending in August 2026?",
+      "semantic_query": null,
+      "sql": "SELECT ...",
+      "created_at": 1794321786.05
+    }
   ]
 }
 ```
@@ -271,7 +280,7 @@ Retrieves active conversational dialogue turns, turn counts, and message objects
 
 ### `DELETE /api/v1/agent/session/{session_id}`
 
-Resets and clears the in-memory conversation history and sliding message window for a specific `session_id`.
+Deletes the stored conversation turns (SQLite) for a specific `session_id`.
 
 #### Path Parameters
 | Parameter | Type | Required | Description |
