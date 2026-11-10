@@ -714,7 +714,7 @@ def test_router_gets_the_previous_turn_for_a_follow_up(monkeypatch):
     assert fake.messages[-1].content == "and in August?"
 
     intent_router.classify("How much did I spend?")
-    assert "standalone_question" not in fake.messages[0].content
+    assert "continues a conversation" not in fake.messages[0].content  # no follow-up section on a first turn
 
 
 def test_follow_up_retrieves_the_standalone_question_and_keeps_previous_filters(monkeypatch):

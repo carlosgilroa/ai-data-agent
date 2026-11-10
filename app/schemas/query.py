@@ -11,15 +11,15 @@ class RouterDecision(BaseModel):
     reasoning: str = Field(..., description="Concise explanation for the chosen intent")
     standalone_question: Optional[str] = Field(
         default=None,
-        description="The message rewritten as a full question that needs no conversation history, when it is a follow-up; otherwise the message unchanged.",
+        description="The message as a full question in English that needs no conversation history: rewritten when it is a follow-up, translated when it is in another language, otherwise the message unchanged.",
     )
     measures: List[str] = Field(
         default_factory=list,
-        description="What to calculate, in the user's words (e.g. ['<measure>']).",
+        description="What to calculate, in the user's words translated to English (e.g. ['<measure>']).",
     )
     dimensions: List[str] = Field(
         default_factory=list,
-        description="What to group or break the result down by, in the user's words (e.g. ['<dimension>'], ['<dimension>', 'month']). Empty when the question asks for a single total.",
+        description="What to group or break the result down by, in the user's words translated to English (e.g. ['<dimension>'], ['<dimension>', 'month']). Empty when the question asks for a single total.",
     )
     filter_values: List[str] = Field(
         default_factory=list,
