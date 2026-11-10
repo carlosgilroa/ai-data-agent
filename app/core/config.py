@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     RETRIEVAL_GLOSSARY: int = 3
     RETRIEVAL_GOLDEN_QUERIES: int = 2
 
+    # Stop the tool loop and answer once a question has used this many input tokens (0 = no ceiling)
+    MAX_INPUT_TOKENS_PER_QUESTION: int = 40000
+    # Reload the parquet files when they change, once they have been untouched for this many seconds
+    # (the wallet pipeline rewrites them in place, so a file younger than this may be half written)
+    DATA_RELOAD_STABLE_SECONDS: float = 60.0
+
     # Data paths (pointing to local lakehouse and semantic layer)
     WALLET_DATA_DIR: Path = Path("C:/projects/wallet/data")
     LOOKML_DIR: Path = Path("C:/projects/wallet-lookml")
