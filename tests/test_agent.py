@@ -875,3 +875,46 @@ def test_answers_are_always_in_the_instructions_language(monkeypatch):
     decision = NS(measures=[], dimensions=[], filter_values=[], time_period=None)
     prompt, _ = runner_module.agent_runner._system_prompt(decision, "¿Cuánto gasté?")
     assert "Always write the answer in English" in prompt
+
+
+# Router outputs taken from logged live runs, so the ranking is checked without calling Gemini
+RANKING_CASES = [
+    # (question, measure phrase, dimension phrase, filter values, acceptable top explores)
+    ("How much did I spend on public transport last month?", "total spend", "", ["public transport"],
+     {"mart_expense_summary", "fct_transactions"}),
+    ("How much did I spend on restaurants last month?", "spending", "", ["restaurants"],
+     {"mart_expense_summary", "fct_transactions"}),
+    ("What was my savings rate this year?", "savings rate", "", [], {"fct_transactions", "mart_monthly_pnl"}),
+    ("What were my top 5 merchants by spend in September 2026?", "spend", "merchants", [],
+     {"mart_expense_summary", "fct_transactions"}),
+    ("Which categories grew the most compared to the previous month?", "spend change", "category", [],
+     {"pdt_category_mom_velocity"}),
+]
+
+
+@pytest.mark.parametrize("question,measure,dimension,values,acceptable", RANKING_CASES)
+def test_explore_ranking_puts_a_fitting_explore_first(question, measure, dimension, values, acceptable):
+    from app.agent.tools.rag_tool import retrieve
+
+    r = retrieve(question, measure_phrase=measure, dimension_phrase=dimension, filter_values=values)
+    assert r.explores[0] in acceptable, r.scored()["explores"]
+
+
+def test_every_explore_is_scored_on_its_own_similarity():
+    """Each kept explore has its own similarity, not only the one closest to the question."""
+    from app.agent.tools.rag_tool import retrieve
+
+    r = retrieve("How much did I spend on public transport last month?", measure_phrase="total spend",
+                 filter_values=["public transport"])
+    assert all(e["parts"]["own"] > 0 for e in r.scored()["explores"])
+
+
+def test_a_measure_ranks_its_home_explore_above_explores_that_join_it():
+    """fct_transactions.savings_rate_pct is also reachable from transaction_labels (which joins fct_transactions);
+    with equal similarity, the explore built on fct_transactions comes first."""
+    from app.agent.tools.rag_tool import retrieve
+
+    r = retrieve("What was my savings rate this year?", measure_phrase="savings rate")
+    order = r.explores
+    assert "fct_transactions" in order
+    assert "transaction_labels" not in order or order.index("fct_transactions") < order.index("transaction_labels")
